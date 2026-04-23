@@ -11,7 +11,7 @@ from pymycobot.mycobot import MyCobot
 PORT = os.environ.get("PORT", "/dev/ttyACM0")
 BAUD = int(os.environ.get("BAUD", "1000000"))
 
-INTERFACE_URL = os.environ.get("INTERFACE_URL", "ws://vh-vision:8000/ws/detections")
+INTERFACE_URL = os.environ.get("INTERFACE_URL", "ws://vh-vision:8000/ws/states")
 
 class CobotDetectionClient:
     def __init__(self, interface_url=INTERFACE_URL):
@@ -20,16 +20,35 @@ class CobotDetectionClient:
         self.running = False
 
     async def connect(self):
-        """Connect to detection stream and process detections"""
+        """Connect to state stream (or raw detections) and normalize the
+        target into a {"center": {"x": px, "y": py}} dict so the motion
+        loop stays schema-agnostic.
+
+        Preference order per message: fused (Kalman + physics) -> states
+        (Kalman only) -> detections (raw YOLO). fused/states persist
+        during brief YOLO dropouts; that's why we point at /ws/states
+        by default rather than /ws/detections.
+        """
         print(f"[INFO] Connecting to {self.url}")
         try:
             async with websockets.connect(self.url) as websocket:
-                print("[INFO] Connected to detection stream (30Hz)")
+                print("[INFO] Connected to target stream (30Hz)")
                 self.running = True
                 while self.running:
                     message = await websocket.recv()
                     data = json.loads(message)
-                    self.latest_detections = data.get("detections", [])
+
+                    target = None
+                    for key in ("fused", "states", "detections"):
+                        items = data.get(key) or []
+                        if items:
+                            t0 = items[0]
+                            pos = t0.get("position") or t0.get("center")
+                            if pos and "x" in pos and "y" in pos:
+                                target = {"center": {"x": pos["x"], "y": pos["y"]}}
+                                break
+
+                    self.latest_detections = [target] if target else []
         except Exception as e:
             print(f"[WARN] Detection client error: {e}")
             await asyncio.sleep(1)
