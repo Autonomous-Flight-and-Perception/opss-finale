@@ -77,9 +77,14 @@ class PipelineConfig:
     detection_threshold: float = 0.35
     max_detections: int = 20
 
-    # Tracking
+    # Tracking. Multiple trackers can run in parallel against the same
+    # detection stream (for filter-comparison demos); ``primary_tracker``
+    # selects which one drives the cobot wire feed.
     max_track_distance: float = 100.0
-    tracker_type: str = "kalman"  # "kalman" or "ukf"
+    tracker_types: List[str] = field(
+        default_factory=lambda: ["kalman"]
+    )  # subset of {"kalman", "ukf"}
+    primary_tracker: Optional[str] = None  # defaults to tracker_types[0]
 
     # Physics validation
     max_velocity: float = 50.0
@@ -106,7 +111,11 @@ class OPSSPipeline:
 
         # Initialize components
         self._camera: Optional[RealSenseCamera] = None
-        self._tracker: Optional[MultiObjectKalmanFilter] = None
+        # Trackers run in parallel against the same detection stream.
+        # Keyed by tracker name; values are tracker instances with an
+        # .update(detections, timestamp) -> List[ObjectState] interface.
+        self._trackers: Dict[str, object] = {}
+        self._primary_tracker_name: Optional[str] = None
         self._validator: Optional[PhysicsValidator] = None
         self._fusion: Optional[B23Fusion] = None
         self._broadcaster: Optional[UnixSocketBroadcaster] = None
@@ -141,11 +150,14 @@ class OPSSPipeline:
             "last_update": time.time()
         }
 
-        # Latest outputs (for API access)
+        # Latest outputs (for API access). Per-tracker dicts plus a
+        # rolled-up "primary" view kept on the legacy single-tracker keys
+        # for back-compat with the existing /states/latest, /fused/latest,
+        # and /ws/states endpoints.
         self._lock = threading.Lock()
         self._latest_detections: List[Dict] = []
-        self._latest_states: List[ObjectState] = []
-        self._latest_fused: List[FusedState] = []
+        self._latest_states_by_tracker: Dict[str, List[ObjectState]] = {}
+        self._latest_fused_by_tracker: Dict[str, List[FusedState]] = {}
         self._latest_frame: Optional[np.ndarray] = None
 
     def initialize(self) -> bool:
@@ -174,51 +186,73 @@ class OPSSPipeline:
                 print("[PIPELINE] WARNING: YOLO detection unavailable (torch/ultralytics not loaded)")
                 print("[PIPELINE]          Detection will return empty results")
 
-            # State tracker (Kalman or UKF)
-            if self.config.tracker_type == "ukf" and UKF_AVAILABLE:
-                # Read hardware intrinsics (camera is already started)
-                camera_intr = None
-                hw_intr = self._camera.get_intrinsics()
-                if hw_intr is not None:
-                    from ..state.ukf_nn_tracker import CameraIntrinsics
-                    from ..state.ukf_nn import config as ukf_cfg
-                    camera_intr = CameraIntrinsics(
-                        fx=hw_intr["fx"], fy=hw_intr["fy"],
-                        cx=hw_intr["cx"], cy=hw_intr["cy"],
-                    )
-                    # Warn if hardware intrinsics differ from config defaults
-                    tol = ukf_cfg.INTRINSIC_WARN_TOLERANCE
-                    for name, hw_val, cfg_val in [
-                        ("fx", hw_intr["fx"], ukf_cfg.CAMERA_FX),
-                        ("fy", hw_intr["fy"], ukf_cfg.CAMERA_FY),
-                        ("cx", hw_intr["cx"], ukf_cfg.CAMERA_CX),
-                        ("cy", hw_intr["cy"], ukf_cfg.CAMERA_CY),
-                    ]:
-                        if cfg_val > 0 and abs(hw_val - cfg_val) / cfg_val > tol:
-                            print(f"[PIPELINE] WARNING: Hardware {name}={hw_val:.1f} "
-                                  f"differs from config {cfg_val:.1f} by "
-                                  f"{abs(hw_val - cfg_val) / cfg_val * 100:.1f}%")
+            # State trackers — one or more run in parallel against the
+            # same detection stream. Each emits independent states/fused
+            # output; ``primary`` is the one whose fused list is sent to
+            # the cobot wire feed.
+            requested = list(self.config.tracker_types) or ["kalman"]
+            self._primary_tracker_name = self.config.primary_tracker or requested[0]
 
-                # Pure UKF: model_path=None disables the NN residual term so
-                # UKF3D runs with a gravity-only process model. The underlying
-                # tracker class is MultiObjectUKFNN by historical naming, but
-                # nothing about the algorithm is NN-specific in this mode.
-                self._tracker = create_ukf_nn_tracker(
+            # Camera intrinsics — needed by the UKF for pixel→meter unprojection
+            camera_intr = None
+            hw_intr = self._camera.get_intrinsics()
+            if hw_intr is not None:
+                from ..state.ukf_nn_tracker import CameraIntrinsics
+                from ..state.ukf_nn import config as ukf_cfg
+                camera_intr = CameraIntrinsics(
+                    fx=hw_intr["fx"], fy=hw_intr["fy"],
+                    cx=hw_intr["cx"], cy=hw_intr["cy"],
+                )
+                # Warn if hardware intrinsics drift from config defaults
+                tol = ukf_cfg.INTRINSIC_WARN_TOLERANCE
+                for name, hw_val, cfg_val in [
+                    ("fx", hw_intr["fx"], ukf_cfg.CAMERA_FX),
+                    ("fy", hw_intr["fy"], ukf_cfg.CAMERA_FY),
+                    ("cx", hw_intr["cx"], ukf_cfg.CAMERA_CX),
+                    ("cy", hw_intr["cy"], ukf_cfg.CAMERA_CY),
+                ]:
+                    if cfg_val > 0 and abs(hw_val - cfg_val) / cfg_val > tol:
+                        print(f"[PIPELINE] WARNING: Hardware {name}={hw_val:.1f} "
+                              f"differs from config {cfg_val:.1f} by "
+                              f"{abs(hw_val - cfg_val) / cfg_val * 100:.1f}%")
+
+            for name in requested:
+                if name == "kalman":
+                    self._trackers["kalman"] = create_tracker(
+                        max_distance=self.config.max_track_distance,
+                        max_tracks=self.config.max_tracks,
+                    )
+                    print("[PIPELINE] Kalman tracker initialized")
+                elif name == "ukf":
+                    if not UKF_AVAILABLE:
+                        print("[PIPELINE] WARNING: UKF requested but unavailable, skipping")
+                        continue
+                    # model_path=None => pure UKF (no NN residual term).
+                    self._trackers["ukf"] = create_ukf_nn_tracker(
+                        max_distance=self.config.max_track_distance,
+                        model_path=None,
+                        stats_path=None,
+                        camera=camera_intr,
+                        max_tracks=self.config.max_tracks,
+                    )
+                    print("[PIPELINE] UKF tracker initialized (pure UKF, no NN)")
+                else:
+                    print(f"[PIPELINE] WARNING: unknown tracker '{name}', skipping")
+
+            if not self._trackers:
+                print("[PIPELINE] No trackers initialized — falling back to Kalman")
+                self._trackers["kalman"] = create_tracker(
                     max_distance=self.config.max_track_distance,
-                    model_path=None,
-                    stats_path=None,
-                    camera=camera_intr,
                     max_tracks=self.config.max_tracks,
                 )
-                print("[PIPELINE] UKF tracker initialized (pure UKF, no NN)")
-            else:
-                self._tracker = create_tracker(
-                    max_distance=self.config.max_track_distance,
-                    max_tracks=self.config.max_tracks,
-                )
-                print("[PIPELINE] Kalman tracker initialized")
-                if self.config.tracker_type == "ukf" and not UKF_AVAILABLE:
-                    print("[PIPELINE] WARNING: UKF requested but unavailable, using Kalman")
+                self._primary_tracker_name = "kalman"
+
+            if self._primary_tracker_name not in self._trackers:
+                # Fallback: primary not available — use the first one we built.
+                self._primary_tracker_name = next(iter(self._trackers))
+
+            print(f"[PIPELINE] Active trackers: {list(self._trackers)}; "
+                  f"primary (drives cobot): {self._primary_tracker_name}")
 
             # Physics validator
             self._validator = create_validator({
@@ -352,99 +386,105 @@ class OPSSPipeline:
 
                 t1 = time.perf_counter()
 
-                # Update tracker
-                try:
-                    states = self._tracker.update(detections_scaled, timestamp)
-                    if hasattr(self._tracker, 'last_timing'):
-                        self.stats["tracker_substage"] = self._tracker.last_timing
-                except Exception as e:
-                    print(f"[PIPELINE] Tracker error: {e}")
-                    states = []
+                # Run every active tracker against the same detection batch.
+                # Each tracker maintains its own internal track state.
+                states_by_tracker: Dict[str, List[ObjectState]] = {}
+                for name, tracker in self._trackers.items():
+                    try:
+                        states_by_tracker[name] = tracker.update(detections_scaled, timestamp)
+                    except Exception as e:
+                        print(f"[PIPELINE] Tracker '{name}' error: {e}")
+                        states_by_tracker[name] = []
 
                 t2 = time.perf_counter()
 
-                # Validate states with physics engine
-                try:
-                    validation_results = self._validator.validate_states(states)
-                except Exception as e:
-                    print(f"[PIPELINE] Validator error: {e}")
-                    validation_results = []
-
-                t3 = time.perf_counter()
-
-                # Fuse estimates
-                try:
-                    fused_states = self._fusion.fuse_batch(states, validation_results)
-                except Exception as e:
-                    print(f"[PIPELINE] Fusion error: {e}")
-                    fused_states = []
+                # Validate + fuse per-tracker so each filter has its own
+                # complete output story (states, validations, fused).
+                fused_by_tracker: Dict[str, List[FusedState]] = {}
+                validation_by_tracker: Dict[str, List[ValidationResult]] = {}
+                for name, states in states_by_tracker.items():
+                    try:
+                        vresults = self._validator.validate_states(states)
+                    except Exception as e:
+                        print(f"[PIPELINE] Validator error for '{name}': {e}")
+                        vresults = []
+                    try:
+                        fused = self._fusion.fuse_batch(states, vresults)
+                    except Exception as e:
+                        print(f"[PIPELINE] Fusion error for '{name}': {e}")
+                        fused = []
+                    validation_by_tracker[name] = vresults
+                    fused_by_tracker[name] = fused
 
                 t4 = time.perf_counter()
 
                 # Record per-stage latencies
                 self.stats["latency_detect_ms"] = (t1 - t0) * 1000
                 self.stats["latency_track_ms"] = (t2 - t1) * 1000
-                self.stats["latency_validate_ms"] = (t3 - t2) * 1000
-                self.stats["latency_fuse_ms"] = (t4 - t3) * 1000
+                self.stats["latency_validate_fuse_ms"] = (t4 - t2) * 1000
                 self.stats["latency_total_ms"] = (t4 - t0) * 1000
 
-                # Count valid/invalid
-                valid_count = sum(1 for v in validation_results if v.is_valid)
-                invalid_count = len(validation_results) - valid_count
+                # Aggregate valid/invalid across all trackers
+                valid_count = sum(
+                    sum(1 for v in vs if v.is_valid)
+                    for vs in validation_by_tracker.values()
+                )
+                invalid_count = sum(
+                    sum(1 for v in vs if not v.is_valid)
+                    for vs in validation_by_tracker.values()
+                )
 
-                # Draw on full frame
-                annotated_full = self._draw_annotations(frame_full, fused_states)
+                # Draw all trackers' fused boxes on the full frame, each in
+                # its own color so the comparison is visible on the stream.
+                annotated_full = self._draw_annotations_multi(
+                    frame_full, fused_by_tracker
+                )
 
                 # Update latest outputs
+                primary = self._primary_tracker_name
+                primary_fused = fused_by_tracker.get(primary, [])
                 with self._lock:
                     self._latest_detections = detections_scaled
-                    self._latest_states = states
-                    self._latest_fused = fused_states
+                    self._latest_states_by_tracker = states_by_tracker
+                    self._latest_fused_by_tracker = fused_by_tracker
                     self._latest_frame = annotated_full
 
-                # Send canonical control output to the cobot (schema
-                # ``opss.cobot.v1``; see opss/cobot/broadcaster.py module
-                # docstring). This broadcast is unconditional per tick —
-                # including when ``fused_states`` is empty — so the
-                # datagram cadence acts as the pipeline heartbeat. The
-                # cobot-side consumer distinguishes three states:
-                #
-                #   - healthy + targets:   targets non-empty, fresh ts
-                #   - healthy + no targets: targets == [],    fresh ts
-                #   - pipeline dead:       no datagram within staleness
-                #                           window (~200 ms at 30 Hz)
-                #
-                # Raw YOLO detections are no longer broadcast on the
-                # canonical channel; ``send_raw_detections`` is retained
-                # on the broadcaster as a debug-only method.
+                # Cobot wire feed = primary tracker only. Schema unchanged.
                 if self._broadcaster:
                     pipeline_info = {
                         "healthy": True,
                         "fps": float(self.stats.get("pipeline_fps", 0.0)),
-                        "tracker": self.config.tracker_type,
-                        "frame": self._control_frame(fused_states),
+                        "tracker": primary,
+                        "frame": self._control_frame(primary_fused),
                     }
                     self._broadcaster.send_control_output(
-                        fused_states, pipeline_info
+                        primary_fused, pipeline_info
                     )
 
-                # Diagnostic feedback loop
+                # Diagnostic feedback loop — run on primary's states
                 if self.config.enable_diagnostics:
-                    self._run_diagnostic_loop(states, timestamp)
+                    self._run_diagnostic_loop(
+                        states_by_tracker.get(primary, []), timestamp
+                    )
 
-                # Callbacks
+                # Callbacks (back-compat: pass primary's data)
                 if self._on_detection:
                     self._on_detection(detections_scaled)
                 if self._on_state:
-                    self._on_state(states)
+                    self._on_state(states_by_tracker.get(primary, []))
                 if self._on_output:
-                    self._on_output(fused_states)
+                    self._on_output(primary_fused)
 
                 # Update stats
                 frame_count += 1
                 self.stats["frames_processed"] += 1
                 self.stats["detections_total"] += len(detections_scaled)
-                self.stats["tracks_active"] = len(self._tracker.trackers)
+                self.stats["tracks_active"] = sum(
+                    len(getattr(t, "trackers", {})) for t in self._trackers.values()
+                )
+                self.stats["tracks_per_filter"] = {
+                    n: len(getattr(t, "trackers", {})) for n, t in self._trackers.items()
+                }
                 self.stats["valid_states"] += valid_count
                 self.stats["invalid_states"] += invalid_count
 
@@ -458,14 +498,16 @@ class OPSSPipeline:
                     last_stats_time = now
 
                     lat = self.stats.get("latency_total_ms", 0)
+                    per_filter = self.stats.get("tracks_per_filter", {})
+                    per_filter_str = ", ".join(f"{n}={c}" for n, c in per_filter.items()) or "-"
+                    total_validations = sum(len(vs) for vs in validation_by_tracker.values())
                     print(f"[PIPELINE] {self.stats['pipeline_fps']:.1f} FPS | "
-                          f"Tracks: {self.stats['tracks_active']} | "
-                          f"Valid: {valid_count}/{len(validation_results)} | "
+                          f"Tracks: {self.stats['tracks_active']} ({per_filter_str}) | "
+                          f"Valid: {valid_count}/{total_validations} | "
                           f"Latency: {lat:.1f}ms "
                           f"(det={self.stats.get('latency_detect_ms', 0):.1f} "
                           f"trk={self.stats.get('latency_track_ms', 0):.1f} "
-                          f"val={self.stats.get('latency_validate_ms', 0):.1f} "
-                          f"fuse={self.stats.get('latency_fuse_ms', 0):.1f})")
+                          f"val+fuse={self.stats.get('latency_validate_fuse_ms', 0):.1f})")
 
             except Exception as e:
                 print(f"[PIPELINE] Error: {e}")
@@ -513,59 +555,70 @@ class OPSSPipeline:
 
         return detections
 
-    def _draw_annotations(self, frame: np.ndarray, fused_states: List[FusedState]) -> np.ndarray:
-        """Draw fused state annotations on frame"""
-        import cv2
+    # BGR colors per tracker, chosen to be visually distinct on a typical
+    # color frame and to read as "Kalman = warm, UKF = cool" at a glance.
+    _TRACKER_COLORS = {
+        "kalman": (0, 165, 255),   # orange
+        "ukf":    (255, 200, 0),   # cyan-ish blue
+    }
+    _TRACKER_LABEL = {"kalman": "K", "ukf": "U"}
 
+    def _draw_annotations_multi(
+        self,
+        frame: np.ndarray,
+        fused_by_tracker: Dict[str, List[FusedState]],
+    ) -> np.ndarray:
+        """
+        Draw every active tracker's fused boxes on the frame, each in its
+        own color so a comparison demo can read both at once.
+
+        Per-box visuals:
+          - Solid bbox in the tracker's color
+          - Top-left tag ``[K]`` / ``[U]`` so the source filter is obvious
+          - ID + confidence below the tag
+          - Magenta arrow for velocity (scale depends on units)
+          - Dimmed corners when validator rejected the state
+        """
+        import cv2
         annotated = frame.copy()
 
-        for state in fused_states:
-            bbox = state.bbox
-            if not bbox:
-                continue
+        for name, fused_states in fused_by_tracker.items():
+            base_color = self._TRACKER_COLORS.get(name, (255, 255, 255))
+            tag = self._TRACKER_LABEL.get(name, name[:1].upper() or "?")
 
-            x1 = bbox.get("x1", 0)
-            y1 = bbox.get("y1", 0)
-            x2 = bbox.get("x2", 0)
-            y2 = bbox.get("y2", 0)
+            for state in fused_states:
+                bbox = state.bbox
+                if not bbox:
+                    continue
+                x1, y1 = bbox.get("x1", 0), bbox.get("y1", 0)
+                x2, y2 = bbox.get("x2", 0), bbox.get("y2", 0)
 
-            # Color based on validation status.
-            # After the FusedState contract fix, physics_plausible replaces the
-            # misleading kalman_valid field. Semantics:
-            #   physics_plausible -> validator said the state is physically plausible
-            #                        (i.e. within velocity/continuity bounds for its frame)
-            #   physics_valid     -> downstream physics_valid aggregate (unit-aware by frame)
-            # Both true => green; partial => yellow; neither => red.
-            if state.physics_plausible and state.physics_valid:
-                color = (0, 255, 0)  # Green - fully valid
-            elif state.physics_plausible or state.physics_valid:
-                color = (0, 255, 255)  # Yellow - partially valid
-            else:
-                color = (0, 0, 255)  # Red - invalid
+                # Validation modulates intensity, not hue, so each filter
+                # stays colour-coded but you can still see when it's
+                # producing an invalid state.
+                if state.physics_plausible and state.physics_valid:
+                    color = base_color
+                    thick = 2
+                else:
+                    # 50% dim
+                    color = tuple(int(c * 0.5) for c in base_color)
+                    thick = 1
 
-            # Draw bounding box
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thick)
+                label = f"[{tag}] id={state.track_id} {state.confidence:.2f}"
+                cv2.putText(annotated, label, (x1, max(y1 - 8, 12)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
-            # Draw track ID and confidence
-            label = f"ID:{state.track_id} {state.confidence:.2f}"
-            cv2.putText(annotated, label, (x1, y1 - 10),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-            # Draw velocity vector (use bbox center for arrow origin,
-            # since state.x/y may be in meters for the UKF tracker)
-            arrow_cx = (x1 + x2) // 2
-            arrow_cy = (y1 + y2) // 2
-            if getattr(state, "units", "pixels") == "meters":
-                # Meter-space velocity: scale for pixel visualization
-                vx_scaled = int(state.vx * 10)
-                vy_scaled = int(state.vy * 10)
-            else:
-                vx_scaled = int(state.vx * 0.1)
-                vy_scaled = int(state.vy * 0.1)
-            if abs(vx_scaled) > 1 or abs(vy_scaled) > 1:
-                cv2.arrowedLine(annotated, (arrow_cx, arrow_cy),
-                               (arrow_cx + vx_scaled, arrow_cy + vy_scaled),
-                               (255, 0, 255), 2)
+                # Velocity arrow from bbox center; meter-space vs pixel-space
+                # scaled so both filters' arrows are visually legible.
+                acx, acy = (x1 + x2) // 2, (y1 + y2) // 2
+                if getattr(state, "units", "pixels") == "meters":
+                    vx, vy = int(state.vx * 10), int(state.vy * 10)
+                else:
+                    vx, vy = int(state.vx * 0.1), int(state.vy * 0.1)
+                if abs(vx) > 1 or abs(vy) > 1:
+                    cv2.arrowedLine(annotated, (acx, acy),
+                                    (acx + vx, acy + vy), color, 2)
 
         return annotated
 
@@ -603,21 +656,20 @@ class OPSSPipeline:
             if tag:
                 return tag
 
-        # Fallback by tracker type (empty-target heartbeat path).
-        tracker_type = self.config.tracker_type
-        if tracker_type == "ukf":
-            if UKF_AVAILABLE and self._tracker is not None:
+        # Fallback by primary tracker type (empty-target heartbeat path).
+        primary = self._primary_tracker_name or "kalman"
+        if primary == "ukf":
+            ukf_tracker = self._trackers.get("ukf")
+            if UKF_AVAILABLE and ukf_tracker is not None:
                 # Identity extrinsics => world == camera; non-identity => world.
-                R = getattr(self._tracker, "R_world_from_cam", None)
-                t = getattr(self._tracker, "t_world_from_cam", None)
+                R = getattr(ukf_tracker, "R_world_from_cam", None)
+                t = getattr(ukf_tracker, "t_world_from_cam", None)
                 if R is not None and t is not None:
                     is_identity = (
                         np.allclose(R, np.eye(3), atol=1e-12)
                         and np.allclose(t, 0.0, atol=1e-12)
                     )
                     return "camera_metric" if is_identity else "world_metric"
-            # Before the tracker is constructed, UKF defaults to identity
-            # extrinsics (= camera_metric). See opss.state.ukf_nn_tracker.
             return "camera_metric"
         # Kalman default.
         return "pixel_xy_metric_z"
@@ -627,13 +679,42 @@ class OPSSPipeline:
         with self._lock:
             return self._latest_detections.copy()
 
-    def get_latest_states(self) -> List[Dict]:
+    def get_latest_states(self, tracker: Optional[str] = None) -> List[Dict]:
+        """Tracker-keyed states. If ``tracker`` is None, returns the
+        primary tracker's states (back-compat with single-tracker callers)."""
         with self._lock:
-            return [s.to_dict() for s in self._latest_states]
+            name = tracker or self._primary_tracker_name
+            states = self._latest_states_by_tracker.get(name, [])
+            return [s.to_dict() for s in states]
 
-    def get_latest_fused(self) -> List[Dict]:
+    def get_latest_fused(self, tracker: Optional[str] = None) -> List[Dict]:
+        """Tracker-keyed fused states. ``tracker=None`` returns primary."""
         with self._lock:
-            return [s.to_dict() for s in self._latest_fused]
+            name = tracker or self._primary_tracker_name
+            fused = self._latest_fused_by_tracker.get(name, [])
+            return [s.to_dict() for s in fused]
+
+    def get_latest_states_all(self) -> Dict[str, List[Dict]]:
+        """Per-tracker dict of states for the parallel-comparison view."""
+        with self._lock:
+            return {
+                name: [s.to_dict() for s in states]
+                for name, states in self._latest_states_by_tracker.items()
+            }
+
+    def get_latest_fused_all(self) -> Dict[str, List[Dict]]:
+        """Per-tracker dict of fused states."""
+        with self._lock:
+            return {
+                name: [s.to_dict() for s in fused]
+                for name, fused in self._latest_fused_by_tracker.items()
+            }
+
+    def get_active_trackers(self) -> List[str]:
+        return list(self._trackers.keys())
+
+    def get_primary_tracker(self) -> Optional[str]:
+        return self._primary_tracker_name
 
     def get_latest_frame(self) -> Optional[np.ndarray]:
         with self._lock:

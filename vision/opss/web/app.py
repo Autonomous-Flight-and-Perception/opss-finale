@@ -107,21 +107,71 @@ async def get_detections():
 
 @app.get("/states/latest")
 async def get_states():
-    """Get latest tracked object states (from Kalman filter)"""
+    """Latest states for the *primary* tracker (back-compat)."""
     pipeline = get_app_pipeline()
+    states = pipeline.get_latest_states()
     return JSONResponse({
-        "states": pipeline.get_latest_states(),
-        "count": len(pipeline.get_latest_states())
+        "states": states,
+        "count": len(states),
+        "tracker": pipeline.get_primary_tracker(),
+    })
+
+
+@app.get("/states/{tracker}/latest")
+async def get_states_for_tracker(tracker: str):
+    """Latest states for a specific tracker (e.g. /states/kalman/latest)."""
+    pipeline = get_app_pipeline()
+    if tracker not in pipeline.get_active_trackers():
+        return JSONResponse(
+            {"error": f"tracker '{tracker}' not active",
+             "active": pipeline.get_active_trackers()},
+            status_code=404,
+        )
+    states = pipeline.get_latest_states(tracker)
+    return JSONResponse({
+        "states": states,
+        "count": len(states),
+        "tracker": tracker,
     })
 
 
 @app.get("/fused/latest")
 async def get_fused():
-    """Get latest fused state estimates (from B2₃ fusion)"""
+    """Latest fused states for the *primary* tracker (back-compat)."""
+    pipeline = get_app_pipeline()
+    fused = pipeline.get_latest_fused()
+    return JSONResponse({
+        "fused_states": fused,
+        "count": len(fused),
+        "tracker": pipeline.get_primary_tracker(),
+    })
+
+
+@app.get("/fused/{tracker}/latest")
+async def get_fused_for_tracker(tracker: str):
+    """Latest fused states for a specific tracker (e.g. /fused/ukf/latest)."""
+    pipeline = get_app_pipeline()
+    if tracker not in pipeline.get_active_trackers():
+        return JSONResponse(
+            {"error": f"tracker '{tracker}' not active",
+             "active": pipeline.get_active_trackers()},
+            status_code=404,
+        )
+    fused = pipeline.get_latest_fused(tracker)
+    return JSONResponse({
+        "fused_states": fused,
+        "count": len(fused),
+        "tracker": tracker,
+    })
+
+
+@app.get("/trackers")
+async def list_trackers():
+    """List active trackers and which one is primary (drives the cobot)."""
     pipeline = get_app_pipeline()
     return JSONResponse({
-        "fused_states": pipeline.get_latest_fused(),
-        "count": len(pipeline.get_latest_fused())
+        "active": pipeline.get_active_trackers(),
+        "primary": pipeline.get_primary_tracker(),
     })
 
 
@@ -176,20 +226,39 @@ async def stream_color():
 
 @app.websocket("/ws/states")
 async def websocket_states(websocket: WebSocket):
-    """WebSocket endpoint for real-time state updates"""
+    """
+    Real-time state stream.
+
+    Top-level ``states`` and ``fused`` are the PRIMARY tracker's outputs
+    (back-compat: existing cobot consumer reads these). ``trackers`` is
+    a per-filter dict keyed by tracker name with each filter's
+    independent states + fused outputs — use this for parallel
+    comparison / side-by-side visualization.
+    """
     await websocket.accept()
     print("[WS] Client connected to /ws/states")
-
     pipeline = get_app_pipeline()
 
     try:
         while True:
+            states_all = pipeline.get_latest_states_all()
+            fused_all = pipeline.get_latest_fused_all()
+            primary = pipeline.get_primary_tracker()
+
             data = {
                 "timestamp": time.time(),
                 "detections": pipeline.get_latest_detections(),
-                "states": pipeline.get_latest_states(),
-                "fused": pipeline.get_latest_fused(),
-                "stats": pipeline.get_stats()
+                "states": states_all.get(primary, []),       # primary, back-compat
+                "fused": fused_all.get(primary, []),         # primary, back-compat
+                "primary": primary,
+                "trackers": {                                # per-filter view
+                    name: {
+                        "states": states_all.get(name, []),
+                        "fused":  fused_all.get(name, []),
+                    }
+                    for name in pipeline.get_active_trackers()
+                },
+                "stats": pipeline.get_stats(),
             }
             await websocket.send_json(data)
             await asyncio.sleep(0.033)  # ~30 Hz
