@@ -1,0 +1,52 @@
+{
+  "recording_started_unix": 1776986197.0692573,
+  "recording_started_iso": "2026-04-23T23:16:37.085654Z",
+  "recording_id": "20260423_191637",
+  "host": "http://100.106.218.71:8000",
+  "poll_hz": 10.0,
+  "pipeline_status": {
+    "running": true,
+    "stats": {
+      "frames_processed": 25914,
+      "detections_total": 858,
+      "tracks_active": 0,
+      "valid_states": 4164,
+      "invalid_states": 85,
+      "pipeline_fps": 25.060757511215332,
+      "last_update": 1776986196.973048,
+      "latency_detect_ms": 31.978586994227953,
+      "latency_track_ms": 0.06150599801912904,
+      "latency_validate_fuse_ms": 0.018688006093725562,
+      "latency_total_ms": 32.05878099834081,
+      "tracks_per_filter": {
+        "kalman": 0,
+        "ukf": 0,
+        "pf": 0,
+        "adaptive": 0
+      }
+    },
+    "error_statistics": {
+      "count": 699,
+      "mean_error": 77.13993940628075,
+      "max_error": 236.14473599585088,
+      "std_error": 42.84583017431554,
+      "min_error": 6.978138730532034
+    },
+    "config": {
+      "capture_resolution": "640x480",
+      "inference_resolution": "1280x720",
+      "mode": "dual-resolution"
+    }
+  },
+  "trackers": {
+    "active": [
+      "kalman",
+      "ukf",
+      "pf",
+      "adaptive"
+    ],
+    "primary": "adaptive"
+  },
+  "model_user_best_pt": "6245418 2026-04-22 23:10:09.084027825 -0400",
+  "jetson_uname": "Linux afp-desktop 5.15.148-tegra #1 SMP PREEMPT Mon Jun 16 08:24:48 PDT 2025 aarch64 aarch64 aarch64 GNU/Linux"
+}
