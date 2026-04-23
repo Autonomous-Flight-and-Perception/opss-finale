@@ -1,0 +1,22 @@
+services:
+  cobotpy:
+    build: .
+    image: cobotpy-demo
+    container_name: opss-cobot
+    restart: unless-stopped
+    devices:
+      - ${DEVICE:-/dev/ttyACM0}:${DEVICE:-/dev/ttyACM0}
+    tty: true
+    network_mode: "host"
+    
+    # CRITICAL: Mount /tmp for Unix socket
+    volumes:
+      - /tmp:/tmp
+      - .:/app
+    
+    environment:
+      - PORT=${DEVICE:-/dev/ttyACM0}
+      - BAUD=1000000
+      - PYTHONUNBUFFERED=1
+    
+    command: python run_unix.py

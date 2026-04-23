@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+venv39/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+node_modules/
+*.log
+.claude/

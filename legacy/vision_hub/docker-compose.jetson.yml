@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  vh-vision:
+    build: .
+    container_name: vh-vision-hub
+    restart: unless-stopped
+    privileged: true
+    volumes:
+      - .:/app
+      - /tmp:/tmp  # Unix socket communication
+      - /dev:/dev  # Camera access
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    devices:
+      - /dev/bus/usb:/dev/bus/usb  # RealSense D435
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

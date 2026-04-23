@@ -1,0 +1,100 @@
+# ============================================================
+# OPSS - Optical Projectile Sensing System
+# Python Dependencies
+# ============================================================
+#
+# Install: pip install -r requirements.txt
+#
+# Note: pyrealsense2 must be installed system-wide:
+#   - x86 Linux: sudo apt install python3-pyrealsense2
+#   - Jetson: Build from source (see README.md)
+#   Then symlink into venv:
+#   ln -s /usr/lib/python3/dist-packages/pyrealsense2* venv/lib/python3.*/site-packages/
+#
+# ============================================================
+
+# ------------------------------
+# Web Framework
+# ------------------------------
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.6
+websockets>=12.0
+
+# ------------------------------
+# Computer Vision
+# ------------------------------
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# ------------------------------
+# Machine Learning / Detection
+# ------------------------------
+# PyTorch - CPU version by default
+# For Jetson/CUDA, install separately:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+torch>=2.0.0
+torchvision>=0.15.0
+
+# YOLOv8
+ultralytics>=8.0.0
+
+# ------------------------------
+# Physics Engine
+# ------------------------------
+# (uses numpy - no additional deps)
+scipy>=1.10.0  # For advanced integrators if needed
+
+# ------------------------------
+# Utilities
+# ------------------------------
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# ------------------------------
+# Intel RealSense (System Package)
+# ------------------------------
+# DO NOT pip install - must be system-wide
+# pyrealsense2
+
+# ------------------------------
+# Edge TPU (Optional)
+# ------------------------------
+# For Coral Edge TPU support, install separately:
+# sudo apt install python3-pycoral
+# pycoral
+
+# ------------------------------
+# Development / Testing
+# ------------------------------
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.0.0
+httpx>=0.24.0  # For testing FastAPI
+
+# ------------------------------
+# Optional: Monitoring
+# ------------------------------
+# psutil>=5.9.0  # System monitoring
+# prometheus-client>=0.17.0  # Metrics export
+
+# ============================================================
+# Platform-Specific Notes
+# ============================================================
+#
+# NVIDIA Jetson:
+#   - Use JetPack for CUDA, cuDNN, TensorRT
+#   - Build pyrealsense2 from source with CUDA support
+#   - Install torch from NVIDIA's wheel:
+#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+#
+# Raspberry Pi:
+#   - Use opencv-python-headless instead of opencv-python
+#   - Consider using Edge TPU for acceleration
+#
+# x86 Linux with NVIDIA GPU:
+#   - Install CUDA toolkit first
+#   - Use torch with CUDA support
+#
+# ============================================================

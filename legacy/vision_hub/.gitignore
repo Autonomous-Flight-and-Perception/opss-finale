@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.sqlite3
+.pytest_cache/
+.env
+.python-version
+
+# Editors/OS
+.vscode/
+.idea/
+.DS_Store
+
+# Virtualenvs
+venv*/
+.venv*/

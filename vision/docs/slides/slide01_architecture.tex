@@ -1,0 +1,206 @@
+% Slide 1: OPSS Architecture and Execution Model
+% Drop this frame into your Beamer deck.
+% Requires: \usepackage{tikz}, \usetikzlibrary{arrows.meta, positioning, fit,
+%            backgrounds, calc, decorations.pathreplacing}
+% Requires color definitions (paste into preamble):
+%   \definecolor{sensing}{HTML}{4A90D9}
+%   \definecolor{vision}{HTML}{E67E22}
+%   \definecolor{estimation}{HTML}{27AE60}
+%   \definecolor{validation}{HTML}{8E44AD}
+%   \definecolor{output}{HTML}{C0392B}
+%   \definecolor{infra}{HTML}{7F8C8D}
+
+\begin{frame}{OPSS Architecture and Execution Model}
+
+% ── TOP: Pipeline dataflow ──────────────────────────────────────────
+\begin{center}
+\begin{tikzpicture}[
+    >=Stealth,
+    stage/.style={
+      draw, rectangle, rounded corners=2pt,
+      minimum width=1.6cm, minimum height=0.7cm,
+      inner sep=2pt,
+      align=center, font=\tiny\bfseries,
+      text=white, line width=0.5pt},
+    detail/.style={font=\fontsize{4}{5}\selectfont,
+      text=black!75, align=center, inner sep=0pt},
+    anno/.style={font=\fontsize{4}{5}\selectfont\itshape,
+      text=gray!60!black},
+    arr/.style={->, semithick, color=black!60},
+  ]
+
+  % --- Pipeline stages ---
+  \node[stage, fill=sensing]                          (cam) {Sensing};
+  \node[stage, fill=vision,     right=0.55cm of cam]  (vis) {Vision};
+  \node[stage, fill=estimation, right=0.55cm of vis]  (est) {State Est.};
+  \node[stage, fill=validation, right=0.55cm of est]  (val) {Valid.\,+\,Fusion};
+  \node[stage, fill=output,     right=0.55cm of val]  (out) {Output};
+
+  % --- Detail labels ---
+  \node[detail, below=2pt of cam]  {RealSense D435\\1280$\times$720\\30\,fps RGB-D};
+  \node[detail, below=2pt of vis]  {YOLOv8n FP16\\640$\times$360\\GPU};
+  \node[detail, below=2pt of est]  {Kalman\,/\,UKF-NN\\6D state (m)\\NN residual};
+  \node[detail, below=2pt of val]  {Physics bounds\\B$2_3$ weighted\\adaptive};
+  \node[detail, below=2pt of out]  {Unix socket\\FastAPI dash.\\MyCobot\,280};
+
+  % --- Arrows ---
+  \draw[arr] (cam) -- node[above, anno] {frames} (vis);
+  \draw[arr] (vis) -- node[above, anno] {dets}   (est);
+  \draw[arr] (est) -- node[above, anno] {states} (val);
+  \draw[arr] (val) -- node[above, anno] {fused}  (out);
+
+\end{tikzpicture}
+\end{center}
+
+\vspace{-4pt}
+
+% ── MIDDLE: Two-column layout ───────────────────────────────────────
+\begin{columns}[T]
+
+% --- Left column: Execution model ---
+\begin{column}{0.52\textwidth}
+\textbf{\small Execution Model}
+\begin{itemize}[leftmargin=1.2em, itemsep=1pt, topsep=2pt]
+  \item[\tiny$\blacktriangleright$] \textbf{2 daemon threads} --- camera capture +
+        pipeline processing; web server on async event loop
+  \item[\tiny$\blacktriangleright$] \textbf{Camera-paced} --- no internal timer;
+        pipeline blocks on hardware vsync at 30\,fps
+  \item[\tiny$\blacktriangleright$] \textbf{Bounded queue (depth\,=\,2)} ---
+        \texttt{put\_nowait}; frames dropped under overload,
+        not buffered
+  \item[\tiny$\blacktriangleright$] \textbf{Sequential stages} --- all processing
+        in one thread per frame; no intra-frame parallelism
+  \item[\tiny$\blacktriangleright$] \textbf{Swappable tracker} --- Kalman $\leftrightarrow$
+        UKF-NN behind duck-typed interface
+        (\texttt{update(dets,\,t)\,$\to$\,List[ObjectState]})
+\end{itemize}
+\end{column}
+
+% --- Right column: Timing budget ---
+\begin{column}{0.46\textwidth}
+\textbf{\small Timing Budget (est., 1 track)}
+
+\vspace{2pt}
+\begin{tikzpicture}[
+    >=Stealth,
+    bar/.style={minimum height=0.35cm, anchor=west,
+      font=\fontsize{4.5}{5.5}\selectfont\bfseries, text=white,
+      inner sep=2pt, rounded corners=1pt},
+    lbl/.style={font=\fontsize{4.5}{5.5}\selectfont, text=black!70,
+      anchor=west},
+  ]
+
+  % Scale: 1cm = 6ms.  Budget = 33.3ms = 5.55cm
+  \def\W{5.55}
+
+  % Background (full budget)
+  \fill[black!6, rounded corners=1pt] (0,0) rectangle (\W, 0.35);
+
+  % Detection: 18ms = 3.0cm
+  \node[bar, fill=vision, minimum width=3.0cm] at (0,0) {YOLO 18\,ms};
+  % Resize: 0.4ms = 0.067cm (too small to label)
+  \fill[sensing!70, rounded corners=1pt] (3.0,0) rectangle (3.07, 0.35);
+  % Track: 1ms = 0.167cm
+  \fill[estimation!80, rounded corners=1pt] (3.07,0) rectangle (3.24, 0.35);
+  % Post: 1.2ms = 0.20cm
+  \fill[validation!70, rounded corners=1pt] (3.24,0) rectangle (3.44, 0.35);
+
+  % Headroom brace
+  \draw[<->, thick, color=black!45]
+    (3.44, -0.12) -- (\W, -0.12)
+    node[midway, below=1pt, lbl] {12.8\,ms headroom (38\%)};
+
+  % 30fps deadline
+  \draw[thick, red!55] (\W, -0.05) -- (\W, 0.45)
+    node[above, font=\fontsize{4.5}{5.5}\selectfont\bfseries,
+      text=red!55] {33.3\,ms};
+
+  % Stage labels below
+  \node[lbl] at (3.07, -0.38) {Track 1\,ms};
+  \node[lbl] at (3.55, -0.38) {V+F+Bcast 1.2\,ms};
+
+\end{tikzpicture}
+
+\vspace{6pt}
+\textbf{\small End-to-End Latency}
+
+\vspace{1pt}
+{\fontsize{6}{7.5}\selectfont
+\begin{tabular}{@{}lr@{}}
+  Sensor exposure + readout & $\sim$33\,ms \\
+  Queue buffering (0--1 frame) & 0--33\,ms \\
+  Pipeline processing & $\sim$20\,ms \\
+  Socket tx & $<$0.1\,ms \\
+  \hline
+  \textbf{Glass-to-output} & \textbf{53--86\,ms} \\
+\end{tabular}
+}
+
+\vspace{4pt}
+{\fontsize{5.5}{7}\selectfont
+\textit{Platform:} Jetson Orin Nano\\
+6-core ARM A78AE\;\textbar\;1024 CUDA cores\;\textbar\;8\,GB unified}
+
+\end{column}
+\end{columns}
+
+\end{frame}
+
+% =====================================================================
+% SPEAKER NOTES — key points to defend under faculty questioning
+% =====================================================================
+%
+% Q: "Why sequential stages instead of a pipelined design?"
+% A: Detection is a single indivisible GPU call (~18ms) that dominates
+%    the frame budget. Pipelining would require inter-stage queues and
+%    synchronization but the dominant cost cannot be overlapped with
+%    itself. With 38% headroom at 1 track, the complexity is not
+%    justified. (core.py:244-340)
+%
+% Q: "What happens under overload?"
+% A: Frames are dropped at the queue boundary (camera.py:153-156,
+%    put_nowait). The pipeline always processes the *most recent*
+%    available frame. Worst case: effective FPS drops, tracker
+%    covariance grows during longer inter-frame intervals, correctly
+%    reflecting increased uncertainty. No latency accumulation.
+%
+% Q: "Why only 2 threads instead of a thread-per-stage?"
+% A: Decoupling capture from processing prevents USB buffer corruption
+%    under scheduling delays. Beyond that, adding threads adds sync
+%    overhead without benefit: post-detection stages total ~2ms
+%    combined. The web server runs on a separate async event loop
+%    (Uvicorn) but is not in the control-critical path.
+%
+% Q: "Are the timing numbers measured?"
+% A: These are analytical estimates from algorithmic complexity and
+%    published NVIDIA TensorRT benchmarks for YOLOv8n FP16 on Orin Nano.
+%    No empirical on-device measurements yet. Per-stage instrumentation
+%    is planned (see Risk R3 / Section 7 of the PDR document).
+%
+% Q: "Why is the NN on CPU instead of GPU?"
+% A: The NN has 611 parameters (15->32->3, two layers). At this scale,
+%    GPU kernel launch latency (~10us) plus memory transfer overhead
+%    exceeds the computation itself (<0.1ms as NumPy matmul). Keeping
+%    YOLO as the sole GPU workload also eliminates kernel contention.
+%    Additionally, PyTorch is unusable on this Jetson due to a
+%    libcudnn version mismatch, so inference is pure NumPy.
+%
+% Q: "What's the worst-case latency?"
+% A: 86ms (2.6 frames) — sensor readout (33ms) + 1 frame of queue
+%    buffering (33ms) + processing (20ms). Irreducible floor is 53ms
+%    (1.6 frames) when the queue is empty.
+%
+% Q: "How do you swap trackers?"
+% A: Both MultiObjectKalmanFilter and MultiObjectUKFNN expose the same
+%    duck-typed interface: update(detections, timestamp) -> List[ObjectState].
+%    A single config flag (tracker_type = "kalman" | "ukf_nn") selects
+%    at init time. Fallback: if UKF-NN import fails (torch unavailable),
+%    pipeline auto-degrades to Kalman with a logged warning. (core.py:156-167)
+%
+% Q: "What are your external interfaces?"
+% A: Three: (1) RealSense D435 via USB3 at 30Hz RGB-D (input),
+%    (2) MyCobot 280 via Unix SOCK_DGRAM at /tmp/opss_cobot.sock,
+%    30Hz JSON (output, unidirectional, non-blocking),
+%    (3) Browser via FastAPI — REST, MJPEG, WebSocket (monitoring only,
+%    not control-critical). Cobot/web failures are fault-isolated:
+%    neither stalls the pipeline.

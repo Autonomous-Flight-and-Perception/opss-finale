@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  vh-vision:
+    build: .
+    container_name: vh-vision-hub
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app/app
+      - ./models:/app/models
+    environment:
+      - PYTHONUNBUFFERED=1
+    # GPU section removed for dev machine

@@ -1,0 +1,273 @@
+% OPSS Architecture and Execution Model — standalone vertical diagram
+% Compile with: pdflatex opss_architecture_diagram.tex
+% Produces a tight-cropped PDF you can drag into PowerPoint.
+\documentclass[border=10pt]{standalone}
+
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, fit, backgrounds,
+                 calc, decorations.pathreplacing, shapes.geometric}
+\usepackage{amsmath}
+
+\begin{document}
+\begin{tikzpicture}[
+    >=Stealth,
+    % --- node styles ---
+    stage/.style={
+      draw, rectangle, rounded corners=3pt,
+      minimum width=4.8cm, minimum height=0.9cm,
+      inner sep=5pt, align=center,
+      font=\footnotesize\bfseries,
+      fill=black!8, line width=0.7pt},
+    detail/.style={
+      font=\scriptsize, text=black!65, align=left,
+      inner sep=0pt, anchor=west},
+    extbox/.style={
+      draw, rectangle, rounded corners=3pt,
+      minimum width=4.8cm, minimum height=0.9cm,
+      inner sep=5pt, align=center,
+      font=\footnotesize, fill=white, line width=0.7pt,
+      double, double distance=1pt},
+    qbox/.style={
+      draw, rectangle, rounded corners=3pt,
+      minimum width=4.8cm, minimum height=0.7cm,
+      inner sep=4pt, align=center,
+      font=\footnotesize, fill=black!4, line width=0.7pt},
+    threadlabel/.style={
+      font=\scriptsize\bfseries, text=black!55,
+      anchor=west},
+    threadbox/.style={
+      draw, rectangle, rounded corners=6pt,
+      inner sep=8pt, dashed, line width=0.8pt,
+      fill=black!2},
+    arr/.style={->, thick, color=black!60},
+    anno/.style={font=\scriptsize\itshape, text=black!50},
+    datalabel/.style={font=\scriptsize, text=black!60,
+      anchor=west},
+    heading/.style={font=\large\bfseries, text=black},
+    subheading/.style={font=\small\bfseries, text=black!80},
+  ]
+
+  % Column positions
+  \def\stageX{0}       % center of stage column
+  \def\detailX{3.2}    % left edge of detail column
+  \def\timingX{7.5}    % left edge of timing column
+
+  % ====================================================================
+  % TITLE
+  % ====================================================================
+  \node[heading] at (4.5, 0)
+    {OPSS Architecture and Execution Model};
+
+  % ====================================================================
+  % EXTERNAL INPUT — RealSense D435
+  % ====================================================================
+  \node[extbox] (sensor) at (\stageX, -1.5)
+    {Intel RealSense D435};
+  \node[detail] at (\detailX, -1.35)
+    {USB 3.0, 30\,fps synchronized RGB-D};
+  \node[detail] at (\detailX, -1.65)
+    {1280$\times$720 color + 1280$\times$720 depth (16-bit mm)};
+
+  % ====================================================================
+  % CAMERA THREAD
+  % ====================================================================
+  \node[stage] (capture) at (\stageX, -3.0)
+    {1. Frame Capture};
+  \node[detail] at (\detailX, -2.85)
+    {\texttt{rs.wait\_for\_frames()} --- blocks on hardware vsync};
+  \node[detail] at (\detailX, -3.15)
+    {Convert to NumPy, downsample to 640$\times$360 (bilinear)};
+
+  % Camera thread box
+  \begin{scope}[on background layer]
+    \node[threadbox, fit=(capture),
+      inner xsep=12pt, inner ysep=14pt] (camthread) {};
+  \end{scope}
+  \node[threadlabel] at ([xshift=-6pt]camthread.north west)
+    {Camera Thread (daemon)};
+
+  \draw[arr] (sensor) -- (capture)
+    node[midway, right, anno, xshift=3pt] {RGB-D frames};
+
+  % ====================================================================
+  % BOUNDED QUEUE
+  % ====================================================================
+  \node[qbox] (queue) at (\stageX, -4.6)
+    {Bounded Queue --- depth\,=\,2};
+  \node[detail] at (\detailX, -4.6)
+    {\texttt{put\_nowait()} --- \textbf{drop on full}, no backpressure};
+
+  \draw[arr] (capture) -- (queue)
+    node[midway, right, anno, xshift=3pt]
+      {color$_\text{full}$\,+\,color$_\text{small}$\,+\,depth};
+
+  % ====================================================================
+  % PIPELINE THREAD — vertical stack
+  % ====================================================================
+
+  % --- Detection ---
+  \node[stage] (detect) at (\stageX, -6.2)
+    {2. Object Detection};
+  \node[detail] at (\detailX, -6.05)
+    {YOLOv8 Nano, FP16 on GPU (1024 CUDA cores)};
+  \node[detail] at (\detailX, -6.35)
+    {Confidence $> 0.55$, max 20 detections, persons class};
+
+  % --- Depth augmentation ---
+  \node[stage] (depth) at (\stageX, -7.6)
+    {3. Depth Augmentation};
+  \node[detail] at (\detailX, -7.45)
+    {Scale bboxes $2\times$ to full resolution};
+  \node[detail] at (\detailX, -7.75)
+    {Point-sample depth at detection center, mm\,$\to$\,m};
+
+  % --- Tracking ---
+  \node[stage] (track) at (\stageX, -9.2)
+    {4. Multi-Object Tracking};
+  \node[detail] at (\detailX, -8.9)
+    {Predict\,$\to$\,associate\,$\to$\,update cycle};
+  \node[detail] at (\detailX, -9.2)
+    {6D state: $[x,y,z,\dot{x},\dot{y},\dot{z}]$ in world-frame meters};
+  \node[detail] at (\detailX, -9.5)
+    {Swappable: Kalman \textit{or} UKF-NN (config flag)};
+
+  % --- Physics validation ---
+  \node[stage] (valid) at (\stageX, -10.9)
+    {5. Physics Validation};
+  \node[detail] at (\detailX, -10.75)
+    {Velocity $<50$\,m/s, acceleration $<100$\,m/s$^2$};
+  \node[detail] at (\detailX, -11.05)
+    {Trajectory consistency check vs.\ kinematic prediction};
+
+  % --- B2_3 Fusion ---
+  \node[stage] (fuse) at (\stageX, -12.4)
+    {6. B$2_3$ State Fusion};
+  \node[detail] at (\detailX, -12.15)
+    {Adaptive weighting (Kalman 0.6\,/\,Physics 0.4)};
+  \node[detail] at (\detailX, -12.4)
+    {Confidence $\times 0.7$ if invalid, $\times 0.5$ if implausible};
+  \node[detail] at (\detailX, -12.65)
+    {Forward prediction at $t + 0.5$\,s for robot control};
+
+  % --- Render + Broadcast ---
+  \node[stage] (bcast) at (\stageX, -14.0)
+    {7. Render + Broadcast};
+  \node[detail] at (\detailX, -13.85)
+    {Annotated frame under \texttt{threading.Lock} (mutex)};
+  \node[detail] at (\detailX, -14.15)
+    {JSON broadcast via Unix socket, rate-limited 30\,Hz};
+
+  % Pipeline thread box
+  \begin{scope}[on background layer]
+    \node[threadbox,
+      fit=(detect)(depth)(track)(valid)(fuse)(bcast)
+           ([xshift=6.5cm]detect.east)
+           ([xshift=6.5cm]bcast.east),
+      inner xsep=12pt, inner ysep=14pt] (pipethread) {};
+  \end{scope}
+  \node[threadlabel] at ([xshift=-6pt]pipethread.north west)
+    {Pipeline Thread (daemon) --- sequential, camera-paced, no internal timer};
+
+  % --- Intra-pipeline arrows ---
+  \draw[arr] (queue) -- (detect)
+    node[midway, right, anno, xshift=3pt] {\texttt{get(timeout=0.1s)}};
+  \draw[arr] (detect) -- (depth)
+    node[midway, right, anno, xshift=3pt] {List[Dict]: bbox, center, conf};
+  \draw[arr] (depth) -- (track)
+    node[midway, right, anno, xshift=3pt] {dets + depth (meters)};
+  \draw[arr] (track) -- (valid)
+    node[midway, right, anno, xshift=3pt] {List[ObjectState] per track};
+  \draw[arr] (valid) -- (fuse)
+    node[midway, right, anno, xshift=3pt] {List[ValidationResult]};
+  \draw[arr] (fuse) -- (bcast)
+    node[midway, right, anno, xshift=3pt] {List[FusedState]};
+
+  % ====================================================================
+  % EXTERNAL OUTPUTS — fork at bottom
+  % ====================================================================
+  \node[extbox, minimum width=3.8cm] (cobot) at (-1.6, -16.0)
+    {MyCobot 280};
+  \node[detail] at (-1.6, -16.7)
+    {\begin{tabular}{@{}l@{}}
+      Unix SOCK\_DGRAM\\
+      \texttt{/tmp/opss\_cobot.sock}\\
+      30\,Hz JSON, non-blocking\\
+      Silent fail if absent
+     \end{tabular}};
+
+  \node[extbox, minimum width=3.8cm] (web) at (3.8, -16.0)
+    {Web Dashboard};
+  \node[detail] at (3.8, -16.7)
+    {\begin{tabular}{@{}l@{}}
+      FastAPI / Uvicorn (async)\\
+      REST, MJPEG, WebSocket\\
+      Port 8000, $\sim$30\,Hz push\\
+      Not control-critical
+     \end{tabular}};
+
+  \draw[arr] (bcast.south) -- ++(0,-0.5) -| (cobot.north);
+  \draw[arr] (bcast.south) -- ++(0,-0.5) -| (web.north);
+
+  % ====================================================================
+  % TIMING COLUMN (right side)
+  % ====================================================================
+  \draw[thick, black!20] (\timingX, -5.5) -- (\timingX, -14.7);
+
+  \node[subheading, anchor=north west] at (\timingX+0.3, -5.6)
+    {Est.\ Timing};
+  \node[subheading, anchor=north west, font=\scriptsize]
+    at (\timingX+0.3, -5.9) {(1 track, GPU)};
+
+  % Per-stage timing annotations
+  \node[detail, font=\scriptsize\bfseries] at (\timingX+0.3, -6.2)
+    {$\sim$18\,ms (54\%)};
+  \node[detail] at (\timingX+0.3, -7.6)
+    {$<$0.1\,ms};
+  \node[detail] at (\timingX+0.3, -9.2)
+    {$\sim$1\,ms};
+  \node[detail] at (\timingX+0.3, -10.9)
+    {$<$0.1\,ms};
+  \node[detail] at (\timingX+0.3, -12.4)
+    {$<$0.1\,ms};
+  \node[detail] at (\timingX+0.3, -14.0)
+    {$\sim$1\,ms};
+
+  % Brace for total
+  \draw[decorate, decoration={brace, amplitude=5pt},
+        semithick, black!40]
+    (\timingX+0.15, -5.7) -- (\timingX+0.15, -14.5)
+    node[midway, left=7pt, font=\scriptsize\bfseries,
+      text=black!55, align=right]
+      {$\sim$20\,ms total\\[2pt]
+       13\,ms headroom\\at 30\,fps};
+
+  % ====================================================================
+  % LATENCY + PLATFORM BOX (bottom-right)
+  % ====================================================================
+  \node[draw, rectangle, rounded corners=4pt,
+        inner sep=8pt, fill=black!3, line width=0.6pt,
+        align=left, font=\scriptsize, anchor=north west]
+    (latency) at (\timingX+0.3, -15.3)
+    {\textbf{Glass-to-Output Latency}\\[3pt]
+     \begin{tabular}{@{}lr@{}}
+       Sensor readout  & $\sim$33\,ms \\
+       Queue (0--1\,fr.)  & 0--33\,ms \\
+       Processing      & $\sim$20\,ms \\
+       Socket tx       & $<$0.1\,ms \\
+       \hline
+       \textbf{Total}  & \textbf{53--86\,ms} \\
+     \end{tabular}};
+
+  % ====================================================================
+  % PLATFORM BOX (very bottom)
+  % ====================================================================
+  \node[draw, rectangle, rounded corners=4pt,
+        inner sep=8pt, fill=black!4, line width=0.6pt,
+        align=center, font=\scriptsize,
+        minimum width=10cm]
+    (platform) at (2.5, -19.0)
+    {\textbf{Platform:} NVIDIA Jetson Orin Nano \quad
+     6-core ARM A78AE~~$|$~~1024 CUDA cores~~$|$~~8\,GB unified memory~~$|$~~All compute on-edge};
+
+\end{tikzpicture}
+\end{document}

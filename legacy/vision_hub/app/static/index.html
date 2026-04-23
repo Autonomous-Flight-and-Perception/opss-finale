@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>OPSS</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <!-- Top Nav -->
+  <header class="nav">
+    <div class="nav-left">
+      <img src="/static/logo.png" class="logo" alt="AFP" />
+      <span class="brand">OPSS</span>
+    </div>
+    <nav class="tabs" role="tablist">
+      <a href="#home"    class="tab" role="tab" aria-controls="home"    aria-selected="true">Home</a>
+      <a href="#rs"      class="tab" role="tab" aria-controls="rs">RealSense Interface</a>
+      <a href="#logsTab" class="tab" role="tab" aria-controls="logsTab">Logs</a>
+    </nav>
+    <div class="statusbar">
+      <span class="dot" id="statusDot" aria-hidden="true"></span>
+      <span id="status" class="badge">Disconnected</span>
+    </div>
+  </header>
+
+  <!-- Pages -->
+  <main class="pages">
+    <!-- HOME -->
+    <section id="home" class="page active" role="tabpanel" aria-labelledby="Home">
+      <div class="hero">
+        <img src="/static/logo.png" alt="AFP" class="hero-logo" />
+        <h1>AFP Vision Hub</h1>
+        <p class="muted">Select a tab to begin.</p>
+      </div>
+    </section>
+
+    <!-- REALSENSE -->
+    <section id="rs" class="page" role="tabpanel" aria-labelledby="RealSense Interface">
+      <div class="toolbar">
+        <div class="group">
+          <button id="start" class="btn primary">Start</button>
+          <button id="stop" class="btn danger">Stop</button>
+          <button id="check" class="btn ghost">Status</button>
+          <button id="capture" class="btn success">Capture</button>
+        </div>
+        <div class="group">
+          <button id="streamColor" class="btn">Start Camera</button>
+          <button id="streamDepth" class="btn">Start LiDAR</button>
+          <button id="stopStreams" class="btn warning">Stop Streams</button>
+        </div>
+        <div class="group">
+          <button id="toggleColor" class="btn ghost" data-target="colorCard">Hide Color</button>
+          <button id="toggleDepth" class="btn ghost" data-target="depthCard">Hide LiDAR</button>
+        </div>
+        <div class="group">
+          <button id="exportDetections" class="btn success">Export JSON</button>
+          <button id="exportPython" class="btn success">Export Python</button>
+          <span id="detectionCount" class="badge" style="background:#0c263d;color:#bfe0ff">0 detections</span>
+        </div>
+        <div class="devinfo"><span class="kv-key">Device</span> <span id="devinfo">—</span></div>
+      </div>
+
+      <!-- Streams area fills viewport, responsive, split 50/50; auto-expand when one hidden -->
+      <section class="streams-wrap">
+        <div class="streams" id="streamsGrid">
+          <figure class="card media" id="colorCard" data-stream="color">
+            <header class="card-head">
+              <span>Color</span>
+              <div class="card-actions">
+                <button class="btn tiny ghost fullscreen" data-img="color">Fullscreen</button>
+              </div>
+            </header>
+            <div class="media-wrap">
+              <img id="color" alt="Color stream" />
+            </div>
+          </figure>
+
+          <figure class="card media" id="depthCard" data-stream="depth">
+            <header class="card-head">
+              <span>Depth</span>
+              <div class="card-actions">
+                <button class="btn tiny ghost fullscreen" data-img="depth">Fullscreen</button>
+              </div>
+            </header>
+            <div class="media-wrap">
+              <img id="depth" alt="Depth stream" />
+            </div>
+          </figure>
+        </div>
+      </section>
+    </section>
+
+    <!-- LOGS -->
+    <section id="logsTab" class="page" role="tabpanel" aria-labelledby="Logs">
+      <div class="panel">
+        <header class="panel-head">
+          <h2>Log</h2>
+          <button type="button" class="btn tiny ghost" onclick="document.getElementById('log').textContent=''">Clear</button>
+        </header>
+        <div class="panel-body">
+          <pre id="log"></pre>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+  <script>
+    // Tabs (hash routing)
+    (function(){
+      const pages = [...document.querySelectorAll('.page')];
+      const tabs  = [...document.querySelectorAll('.tab')];
+      function show(id){
+        pages.forEach(p=>p.classList.toggle('active', '#'+p.id===id));
+        tabs.forEach(t=>t.setAttribute('aria-selected', t.getAttribute('href')===id));
+      }
+      window.addEventListener('hashchange', ()=>show(location.hash||'#home'));
+      show(location.hash||'#home');
+    })();
+
+    // Hide/Show streams with auto-expand
+    (function(){
+      function toggleCard(btn){
+        const id = btn.dataset.target;
+        const card = document.getElementById(id);
+        card.classList.toggle('hidden');
+        btn.textContent = (card.classList.contains('hidden') ?
+          'Show ' + (id==='colorCard'?'Color':'LiDAR') :
+          'Hide ' + (id==='colorCard'?'Color':'LiDAR'));
+        // If one hidden, remaining takes full width
+        const grid = document.getElementById('streamsGrid');
+        const hiddenCount = grid.querySelectorAll('.media.hidden').length;
+        grid.dataset.cols = hiddenCount===1 ? 'one' : 'two';
+      }
+      document.getElementById('toggleColor').onclick = e => toggleCard(e.currentTarget);
+      document.getElementById('toggleDepth').onclick = e => toggleCard(e.currentTarget);
+    })();
+
+    // True fullscreen per card/image
+    (function(){
+      function fs(el){ if(el.requestFullscreen) el.requestFullscreen(); }
+      document.querySelectorAll('.fullscreen').forEach(btn=>{
+        btn.addEventListener('click', ()=>{
+          const img = document.getElementById(btn.dataset.img);
+          fs(img);
+        });
+      });
+    })();
+
+    // Detection export functionality
+    (function(){
+      const exportBtn = document.getElementById('exportDetections');
+      const exportPyBtn = document.getElementById('exportPython');
+      const countBadge = document.getElementById('detectionCount');
+      
+      // Poll detections every 500ms to update count
+      let pollInterval = null;
+      
+      async function updateDetectionCount() {
+        try {
+          const response = await fetch('/api/detections/latest');
+          const data = await response.json();
+          const count = data.detections.length;
+          countBadge.textContent = `${count} detection${count !== 1 ? 's' : ''}`;
+          countBadge.style.background = count > 0 ? '#113728' : '#0c263d';
+          countBadge.style.color = count > 0 ? '#d6ffe9' : '#bfe0ff';
+          countBadge.style.borderColor = count > 0 ? '#1f744a' : 'var(--line)';
+        } catch (error) {
+          // Silent fail
+        }
+      }
+      
+      // Start polling when streams are active
+      const originalStreamColor = window.streamColor;
+      window.streamColor = function() {
+        originalStreamColor();
+        if (!pollInterval) {
+          pollInterval = setInterval(updateDetectionCount, 500);
+        }
+      };
+      
+      const originalStopStreams = window.stopStreams;
+      window.stopStreams = function() {
+        originalStopStreams();
+        if (pollInterval) {
+          clearInterval(pollInterval);
+          pollInterval = null;
+        }
+        countBadge.textContent = '0 detections';
+        countBadge.style.background = '#0c263d';
+        countBadge.style.color = '#bfe0ff';
+        countBadge.style.borderColor = 'var(--line)';
+      };
+      
+      // Generic export handler
+      async function exportDetections(format) {
+        try {
+          const response = await fetch(`/api/detections/export?format=${format}`);
+          const blob = await response.blob();
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0];
+          const ext = format === 'python' ? 'py' : 'json';
+          a.download = `detections_${timestamp}.${ext}`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          window.URL.revokeObjectURL(url);
+          
+          const logEl = document.getElementById('log');
+          if (logEl) {
+            logEl.textContent += `[${new Date().toLocaleTimeString()}] Detections exported as ${format.toUpperCase()}\n`;
+            logEl.scrollTop = logEl.scrollHeight;
+          }
+        } catch (error) {
+          const logEl = document.getElementById('log');
+          if (logEl) {
+            logEl.textContent += `[${new Date().toLocaleTimeString()}] Export failed: ${error.message}\n`;
+            logEl.scrollTop = logEl.scrollHeight;
+          }
+        }
+      }
+      
+      // Export button handlers
+      exportBtn.addEventListener('click', () => exportDetections('json'));
+      exportPyBtn.addEventListener('click', () => exportDetections('python'));
+    })();
+  </script>
+</body>
+</html>

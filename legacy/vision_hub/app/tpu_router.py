@@ -1,0 +1,185 @@
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse, JSONResponse
+import threading, os, cv2, numpy as np
+import pyrealsense2 as rs
+from app.infer_tpu import process_frame_bgr
+from datetime import datetime
+import asyncio
+import json
+
+router = APIRouter()
+WIDTH, HEIGHT, FPS = 640, 480, 30
+USE_TPU = os.getenv("USE_TPU","1") == "1"
+
+_lock = threading.Lock()
+_pipe = None
+_latest_detections = []
+
+def started() -> bool:
+    return _pipe is not None
+
+def start():
+    global _pipe
+    with _lock:
+        if started():
+            return
+        p = rs.pipeline()
+        cfg = rs.config()
+        cfg.enable_stream(rs.stream.color, WIDTH, HEIGHT, rs.format.bgr8, FPS)
+        cfg.enable_stream(rs.stream.depth, WIDTH, HEIGHT, rs.format.z16, FPS)
+        p.start(cfg)
+        _pipe = p
+
+def stop():
+    global _pipe
+    with _lock:
+        if _pipe is not None:
+            try:
+                _pipe.stop()
+            except Exception:
+                pass
+            _pipe = None
+
+@router.get("/health")
+def health():
+    return JSONResponse({"ok": True})
+
+@router.get("/camera/status")
+def camera_status():
+    return JSONResponse({"started": started(), "use_tpu": bool(USE_TPU)})
+
+@router.post("/camera/start")
+def camera_start():
+    start()
+    return JSONResponse({"ok": True, "started": True})
+
+@router.post("/camera/stop")
+def camera_stop():
+    stop()
+    return JSONResponse({"ok": True, "started": False})
+
+@router.get("/detections/latest")
+def get_latest_detections():
+    global _latest_detections
+    with _lock:
+        detections_copy = _latest_detections.copy()
+    print(f"[DEBUG] /detections/latest called, returning {len(detections_copy)} detections")
+    return JSONResponse({
+        "timestamp": datetime.now().isoformat(),
+        "detections": detections_copy,
+        "frame_size": {"width": WIDTH, "height": HEIGHT}
+    })
+
+@router.get("/detections/export")
+def export_detections(format: str = "json"):
+    global _latest_detections
+    timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+    with _lock:
+        detections_copy = _latest_detections.copy()
+    print(f"[DEBUG] /detections/export called with format={format}, {len(detections_copy)} detections")
+    if format == "python":
+        python_code = f'''"""
+Bounding Box Detection Export
+Generated: {datetime.now().isoformat()}
+Frame Resolution: {WIDTH}x{HEIGHT}
+Coordinate System: Pixel coordinates (0,0 is top-left corner)
+"""
+FRAME_WIDTH = {WIDTH}
+FRAME_HEIGHT = {HEIGHT}
+TIMESTAMP = "{datetime.now().isoformat()}"
+detections = {repr(detections_copy)}
+if __name__ == "__main__":
+    print(f"Loaded {{len(detections)}} detections from {{TIMESTAMP}}")
+    print(f"Frame size: {{FRAME_WIDTH}}x{{FRAME_HEIGHT}}")
+    for i, det in enumerate(detections):
+        print(f"\\nDetection {{i+1}}:")
+        print(f"  Class: {{det['class']}}")
+        print(f"  Confidence: {{det['confidence']:.2%}}")
+        print(f"  Top-left: ({{det['corners']['top_left']['x']}}, {{det['corners']['top_left']['y']}})")
+        print(f"  Bottom-right: ({{det['corners']['bottom_right']['x']}}, {{det['corners']['bottom_right']['y']}})")
+        print(f"  Center: ({{det['center']['x']}}, {{det['center']['y']}})")
+'''
+        return JSONResponse(content=python_code, media_type="text/plain", headers={"Content-Disposition": f"attachment; filename=detections_{timestamp_str}.py"})
+    else:
+        data = {"timestamp": datetime.now().isoformat(), "frame_resolution": {"width": WIDTH, "height": HEIGHT}, "detections": detections_copy, "coordinate_format": "pixel coordinates (0,0 is top-left)", "notes": "Each detection has corners: [x1,y1] (top-left) and [x2,y2] (bottom-right)"}
+        return JSONResponse(content=data, headers={"Content-Disposition": f"attachment; filename=detections_{timestamp_str}.json"})
+
+def mjpeg_color():
+    global _latest_detections
+    start()
+    while True:
+        with _lock:
+            p = _pipe
+        if p is None:
+            break
+        frames = p.wait_for_frames()
+        c = frames.get_color_frame()
+        if not c:
+            continue
+        bgr = np.asanyarray(c.get_data())
+        if USE_TPU:
+            try:
+                result = process_frame_bgr(bgr, 0.55)
+                if isinstance(result, tuple):
+                    bgr, detections = result
+                    with _lock:
+                        _latest_detections = detections
+                    print(f"[DEBUG] Frame processed, {len(detections)} detections found")
+                else:
+                    bgr = result
+                    with _lock:
+                        _latest_detections = []
+                    print("[DEBUG] process_frame_bgr returned only bgr (old version?)")
+            except Exception as e:
+                print(f"[ERROR] process_frame_bgr failed: {e}")
+                with _lock:
+                    _latest_detections = []
+        else:
+            with _lock:
+                _latest_detections = []
+        ok, buf = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        if not ok:
+            continue
+        yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n"
+
+def mjpeg_depth():
+    start()
+    while True:
+        with _lock:
+            p = _pipe
+        if p is None:
+            break
+        frames = p.wait_for_frames()
+        d = frames.get_depth_frame()
+        if not d:
+            continue
+        arr = np.asanyarray(d.get_data())
+        d8 = cv2.convertScaleAbs(arr, alpha=0.03)
+        vis = cv2.applyColorMap(d8, cv2.COLORMAP_JET)
+        ok, buf = cv2.imencode(".jpg", vis, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        if not ok:
+            continue
+        yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n"
+
+@router.get("/stream/color")
+def stream_color():
+    return StreamingResponse(mjpeg_color(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+@router.get("/stream/depth")
+def stream_depth():
+    return StreamingResponse(mjpeg_depth(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+@router.websocket("/ws/detections")
+async def websocket_detections(websocket: WebSocket):
+    await websocket.accept()
+    print("[DEBUG] WebSocket client connected")
+    try:
+        while True:
+            with _lock:
+                detections_copy = _latest_detections.copy()
+            await websocket.send_json({"timestamp": datetime.now().isoformat(), "detections": detections_copy, "frame_size": {"width": WIDTH, "height": HEIGHT}})
+            await asyncio.sleep(0.033)
+    except WebSocketDisconnect:
+        print("[DEBUG] WebSocket client disconnected")
+    except Exception as e:
+        print(f"[ERROR] WebSocket error: {e}")

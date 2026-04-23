@@ -1,0 +1,114 @@
+:root{
+  --bg:#0b1320;
+  --panel:#121f31;
+  --card:#162637;
+  --line:#203349;
+  --text:#e8eef4;
+  --muted:#9db1c6;
+  --primary:#5aa7ff;
+  --success:#2fd07b;
+  --danger:#ff6b6b;
+  --warning:#f4c361;
+  --ghost:#1b2a3d;
+  --focus:#9dd1ff;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  font-family: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+               Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji",
+               "Segoe UI Emoji", "Segoe UI Symbol";
+  background:var(--bg);
+  color:var(--text);
+}
+
+/* Top nav with tabs */
+.nav{
+  position:sticky; top:0; z-index:10;
+  display:flex; align-items:center; justify-content:space-between;
+  gap:12px; padding:10px 14px;
+  background:rgba(10,18,32,.9); backdrop-filter:blur(8px);
+  border-bottom:1px solid var(--line);
+}
+.nav-left{display:flex; align-items:center; gap:10px}
+.logo{height:28px}
+.brand{font-weight:600; letter-spacing:.02em}
+.tabs{display:flex; gap:6px}
+.tab{
+  display:inline-block; padding:8px 12px; border-radius:10px;
+  color:var(--text); text-decoration:none; border:1px solid transparent;
+}
+.tab[aria-selected="true"]{background:#0e2236; border-color:var(--line)}
+.tab:hover{background:#0d1c2d}
+.statusbar{display:flex; align-items:center; gap:8px}
+.badge{padding:4px 10px; border-radius:999px; background:#0c263d; color:#bfe0ff; border:1px solid var(--line); font-size:12px}
+.dot{width:10px;height:10px;border-radius:50%;background:#a2adbb}
+
+/* Pages */
+.pages{height:calc(100vh - 56px); overflow:auto}
+.page{display:none; padding:16px}
+.page.active{display:block}
+
+/* Home hero */
+.hero{height:calc(100vh - 56px); display:grid; place-items:center; text-align:center}
+.hero-logo{width:240px; opacity:.95}
+.muted{color:var(--muted)}
+
+/* Toolbar */
+.toolbar{
+  display:flex; flex-wrap:wrap; gap:10px; align-items:center;
+  background:var(--panel); border:1px solid var(--line); border-radius:14px;
+  padding:10px; margin-bottom:12px;
+}
+.group{display:flex; gap:8px}
+.devinfo{margin-left:auto; color:var(--muted); font-size:14px}
+.kv-key{color:var(--muted); margin-right:6px}
+
+/* Buttons */
+.btn{
+  background:var(--ghost); color:var(--text);
+  border:1px solid var(--line); padding:8px 12px; border-radius:10px; cursor:pointer;
+  font-size:14px; line-height:1; transition:filter .15s ease, transform .05s ease;
+}
+.btn:hover{filter:brightness(1.06)}
+.btn:active{transform:translateY(1px)}
+.btn.primary{border-color:#2f6fb6;background:#163354;color:#d7e9ff}
+.btn.success{border-color:#1f744a;background:#113728;color:#d6ffe9}
+.btn.danger{border-color:#7a2e2e;background:#3a1717;color:#ffd7d7}
+.btn.warning{border-color:#7a672e;background:#3a2f17;color:#ffeec4}
+.btn.ghost{background:transparent}
+.btn.tiny{font-size:12px;padding:6px 8px}
+
+/* Panels and cards */
+.panel{background:var(--panel); border:1px solid var(--line); border-radius:14px}
+.panel-head{display:flex; justify-content:space-between; padding:10px 12px; border-bottom:1px solid var(--line)}
+.panel-body{padding:12px}
+
+.card{background:var(--card); border:1px solid var(--line); border-radius:14px; overflow:hidden}
+.card-head{display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border-bottom:1px solid var(--line)}
+.card-actions{display:flex; gap:6px}
+
+/* Stream grid – fills viewport height minus toolbar */
+.streams-wrap{
+  height:calc(100vh - 56px - 120px); /* header + toolbar approx */
+  min-height:420px;
+}
+.streams{
+  height:100%;
+  display:grid; gap:12px;
+  grid-template-columns:1fr 1fr;
+}
+.streams[data-cols="one"]{grid-template-columns:1fr}
+.media.hidden{display:none}
+.media .media-wrap{height:100%; background:#0e1624; display:flex; align-items:center; justify-content:center}
+.media img{width:100%; height:100%; object-fit:contain; background:#0e1826}
+
+/* Log */
+#log{margin:0; padding:12px; max-height:60vh; overflow:auto; font-size:12px; background:#0e1825}
+
+/* Responsive */
+@media (max-width:1100px){
+  .streams-wrap{height:auto}
+  .streams{grid-template-columns:1fr}
+}

@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  # Backend - Physics Engine + KPI Service
+  opss-backend:
+    build:
+      context: ../b2/b2/backend
+      dockerfile: Dockerfile
+    container_name: opss-main
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../b2/b2/backend/docker-compose-setup/shared-config:/app/shared-config:ro
+    networks:
+      - opss-network
+
+  kpi-service:
+    build:
+      context: ../b2/b2/backend/docker-compose-setup/kpi-service
+      dockerfile: Dockerfile
+    container_name: opss-kpi
+    ports:
+      - "8081:8081"
+    volumes:
+      - ../b2/b2/backend/docker-compose-setup/shared-config:/app/shared-config:ro
+    networks:
+      - opss-network
+    environment:
+      - BACKEND_URL=http://opss-main:8080
+    depends_on:
+      - opss-backend
+
+  # vh-vision: replaced by host-side OPSS (run with
+  # `python3 main.py --host 0.0.0.0 --port 8000 --capture-width 640 --capture-height 480`
+  # from ~/Projects/OPSS). GPU-accelerated YOLOv8 on Jetson.
+  # cobotpy reaches it via extra_hosts -> host-gateway below.
+
+  # Cobot Controller
+  cobotpy:
+    build:
+      context: ../cobotpy
+      dockerfile: Dockerfile
+    container_name: opss-cobot
+    devices:
+      - ${DEVICE:-/dev/ttyACM0}:${DEVICE:-/dev/ttyACM0}
+    tty: true
+    volumes:
+      - /tmp:/tmp  # CRITICAL: Unix socket communication
+      - ../cobotpy:/app
+    environment:
+      - PORT=${DEVICE:-/dev/ttyACM0}
+      - BAUD=1000000
+      - PYTHONUNBUFFERED=1
+    extra_hosts:
+      # Route `vh-vision` to the docker host so cobotpy reaches host-side OPSS on port 8000
+      # without needing to change cobotpy's hardcoded ws://vh-vision:8000/ws/detections URL.
+      - "vh-vision:host-gateway"
+    networks:
+      - opss-network
+
+networks:
+  opss-network:
+    driver: bridge
