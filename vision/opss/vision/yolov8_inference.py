@@ -16,7 +16,7 @@ def _get_torch():
 
 
 class YOLOv8Detector:
-    def __init__(self, model_path: str = "user_best.pt", conf_threshold: float = 0.30):
+    def __init__(self, model_path: str = "user_best.pt", conf_threshold: float = 0.15):
         print(f"[YOLO] Initializing YOLOv8 detector...")
 
         try:
@@ -146,7 +146,7 @@ _detector = None
 _detector_lock = threading.Lock()
 
 
-def process_frame_bgr(bgr: np.ndarray, thresh: float = 0.30, persons_only: bool = True) -> Tuple[np.ndarray, List[Dict]]:
+def process_frame_bgr(bgr: np.ndarray, thresh: float = 0.15, persons_only: bool = True) -> Tuple[np.ndarray, List[Dict]]:
     """
     Thread-safe singleton pattern
     """
