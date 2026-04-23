@@ -16,7 +16,7 @@ def _get_torch():
 
 
 class YOLOv8Detector:
-    def __init__(self, model_path: str = "doguilmak_drone_v8x.pt", conf_threshold: float = 0.30):
+    def __init__(self, model_path: str = "user_best.pt", conf_threshold: float = 0.30):
         print(f"[YOLO] Initializing YOLOv8 detector...")
 
         try:

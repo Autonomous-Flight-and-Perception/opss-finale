@@ -70,15 +70,18 @@ Python.
 
 ## Model weights (in `vision/`, tracked via Git LFS)
 
-| File                          | Arch           | Purpose                        | mAP@50 (val) |
-|-------------------------------|----------------|--------------------------------|--------------|
-| `yolov8n.pt`                  | YOLOv8-nano    | Ultralytics COCO default       | 37.3 (COCO)  |
-| `yolo_drone_detect.pt`        | YOLOv26-large  | In-house drone detector        | **0.908**    |
-| `doguilmak_drone_v8x.pt`      | YOLOv8x        | doguilmak drone detector (HF)  | unpublished  |
+| File                          | Arch           | Purpose                        | mAP@50 (val) | FPS (Jetson) |
+|-------------------------------|----------------|--------------------------------|--------------|--------------|
+| `user_best.pt` **(active)**   | **YOLOv8-nano**| **In-use drone detector**      | **0.933**    | **~23**      |
+| `yolo_drone_detect.pt`        | YOLOv26-large  | Earlier in-house drone model   | 0.908        | ~15          |
+| `doguilmak_drone_v8x.pt`      | YOLOv8x        | doguilmak drone detector (HF)  | unpublished  | ~10          |
+| `yolov8n.pt`                  | YOLOv8-nano    | Ultralytics COCO default       | 37.3 (COCO)  | ~30          |
 
 The active model is set in
 `vision/opss/vision/yolov8_inference.py::YOLOv8Detector.__init__` as the default
-`model_path`.
+`model_path`. `user_best.pt` is YOLOv8n fine-tuned on the `drone-1` Colab
+dataset for 20 epochs — best accuracy *and* fastest inference of the drone
+models tested.
 
 ## Key edits vs. upstream sources
 
