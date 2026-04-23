@@ -28,7 +28,7 @@ class ObjectState:
       - ``confidence``  detection confidence in [0, 1].
       - ``units``       legacy tag: one of {"pixels", "meters"}. Describes
                         the PRIMARY unit regime for the tracker. Kalman
-                        emits "pixels" and UKF-NN emits "meters"; this is
+                        emits "pixels" and UKF emits "meters"; this is
                         kept for backward compatibility and for the pixel/
                         meter velocity-arrow scaling in the annotation
                         renderer. Prefer ``frame`` for semantic reasoning.
@@ -82,7 +82,7 @@ class ObjectState:
     confidence: float = 0.0
     bbox: Dict = field(default_factory=dict)
 
-    # Coordinate units ("pixels" for Kalman tracker, "meters" for UKF-NN).
+    # Coordinate units ("pixels" for Kalman tracker, "meters" for UKF).
     # Legacy label — see class docstring. Prefer ``frame`` for semantics.
     units: str = "pixels"
 

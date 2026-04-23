@@ -29,7 +29,7 @@ Output 1  Output 2
 MyCobot   Compute
   280     Error
 
-* Embedded State CNN replaced by UKF-NN (Unscented Kalman Filter with Neural Network)
+* Embedded State CNN slot is filled by the UKF (Unscented Kalman Filter)
 """
 import numpy as np
 import threading
@@ -54,12 +54,13 @@ except Exception:
     YOLO_AVAILABLE = False
     process_frame_bgr = None
 
-# Optional UKF-NN import
+# Optional UKF import (the underlying tracker class is named MultiObjectUKFNN
+# for historical reasons — it supports nn_model=None which gives a pure UKF).
 try:
     from ..state.ukf_nn_tracker import MultiObjectUKFNN, create_ukf_nn_tracker
-    UKF_NN_AVAILABLE = True
+    UKF_AVAILABLE = True
 except ImportError:
-    UKF_NN_AVAILABLE = False
+    UKF_AVAILABLE = False
 
 
 @dataclass
@@ -78,9 +79,7 @@ class PipelineConfig:
 
     # Tracking
     max_track_distance: float = 100.0
-    tracker_type: str = "kalman"  # "kalman" or "ukf_nn"
-    ukf_nn_model_path: Optional[str] = None  # Path to trained UKF-NN model
-    ukf_nn_stats_path: Optional[str] = None  # Path to feature statistics
+    tracker_type: str = "kalman"  # "kalman" or "ukf"
 
     # Physics validation
     max_velocity: float = 50.0
@@ -175,8 +174,8 @@ class OPSSPipeline:
                 print("[PIPELINE] WARNING: YOLO detection unavailable (torch/ultralytics not loaded)")
                 print("[PIPELINE]          Detection will return empty results")
 
-            # State tracker (Kalman or UKF-NN)
-            if self.config.tracker_type == "ukf_nn" and UKF_NN_AVAILABLE:
+            # State tracker (Kalman or UKF)
+            if self.config.tracker_type == "ukf" and UKF_AVAILABLE:
                 # Read hardware intrinsics (camera is already started)
                 camera_intr = None
                 hw_intr = self._camera.get_intrinsics()
@@ -200,22 +199,26 @@ class OPSSPipeline:
                                   f"differs from config {cfg_val:.1f} by "
                                   f"{abs(hw_val - cfg_val) / cfg_val * 100:.1f}%")
 
+                # Pure UKF: model_path=None disables the NN residual term so
+                # UKF3D runs with a gravity-only process model. The underlying
+                # tracker class is MultiObjectUKFNN by historical naming, but
+                # nothing about the algorithm is NN-specific in this mode.
                 self._tracker = create_ukf_nn_tracker(
                     max_distance=self.config.max_track_distance,
-                    model_path=self.config.ukf_nn_model_path,
-                    stats_path=self.config.ukf_nn_stats_path,
+                    model_path=None,
+                    stats_path=None,
                     camera=camera_intr,
                     max_tracks=self.config.max_tracks,
                 )
-                print("[PIPELINE] UKF-NN tracker initialized")
+                print("[PIPELINE] UKF tracker initialized (pure UKF, no NN)")
             else:
                 self._tracker = create_tracker(
                     max_distance=self.config.max_track_distance,
                     max_tracks=self.config.max_tracks,
                 )
                 print("[PIPELINE] Kalman tracker initialized")
-                if self.config.tracker_type == "ukf_nn" and not UKF_NN_AVAILABLE:
-                    print("[PIPELINE] WARNING: UKF-NN requested but not available, using Kalman")
+                if self.config.tracker_type == "ukf" and not UKF_AVAILABLE:
+                    print("[PIPELINE] WARNING: UKF requested but unavailable, using Kalman")
 
             # Physics validator
             self._validator = create_validator({
@@ -549,7 +552,7 @@ class OPSSPipeline:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
             # Draw velocity vector (use bbox center for arrow origin,
-            # since state.x/y may be in meters for UKF-NN tracker)
+            # since state.x/y may be in meters for the UKF tracker)
             arrow_cx = (x1 + x2) // 2
             arrow_cy = (y1 + y2) // 2
             if getattr(state, "units", "pixels") == "meters":
@@ -588,7 +591,7 @@ class OPSSPipeline:
         take the tag from the first state. When the list is empty we
         still need a non-None frame label (the cobot consumer uses it
         to interpret future datagrams), so we derive a default from the
-        tracker type — including, for UKF-NN, whether extrinsics were
+        tracker type — including, for UKF, whether extrinsics were
         set (identity => camera_metric; non-identity => world_metric).
 
         Returns one of:
@@ -602,8 +605,8 @@ class OPSSPipeline:
 
         # Fallback by tracker type (empty-target heartbeat path).
         tracker_type = self.config.tracker_type
-        if tracker_type == "ukf_nn":
-            if UKF_NN_AVAILABLE and self._tracker is not None:
+        if tracker_type == "ukf":
+            if UKF_AVAILABLE and self._tracker is not None:
                 # Identity extrinsics => world == camera; non-identity => world.
                 R = getattr(self._tracker, "R_world_from_cam", None)
                 t = getattr(self._tracker, "t_world_from_cam", None)
@@ -613,7 +616,7 @@ class OPSSPipeline:
                         and np.allclose(t, 0.0, atol=1e-12)
                     )
                     return "camera_metric" if is_identity else "world_metric"
-            # Before the tracker is constructed, UKF-NN defaults to identity
+            # Before the tracker is constructed, UKF defaults to identity
             # extrinsics (= camera_metric). See opss.state.ukf_nn_tracker.
             return "camera_metric"
         # Kalman default.

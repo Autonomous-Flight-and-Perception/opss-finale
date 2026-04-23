@@ -7,7 +7,7 @@ Usage:
     python main.py                    # Start web server on port 8000
     python main.py --port 8080        # Custom port
     python main.py --no-web           # Run pipeline without web server
-    python main.py --tracker ukf_nn   # Use UKF-NN tracker with NN model
+    python main.py --tracker ukf       # Use Unscented Kalman Filter
 """
 import argparse
 import sys
@@ -38,35 +38,19 @@ def main():
         help="Capture resolution height (default: 720)"
     )
     parser.add_argument(
-        "--tracker", choices=["kalman", "ukf_nn"], default="kalman",
-        help="Tracker type (default: kalman)"
-    )
-    parser.add_argument(
-        "--model", type=str, default=None,
-        help="Path to UKF-NN model weights (.weights.npz or .pt)"
-    )
-    parser.add_argument(
-        "--stats", type=str, default=None,
-        help="Path to feature normalization stats (.json)"
+        "--tracker", choices=["kalman", "ukf"], default="kalman",
+        help="State estimator: 'kalman' (linear KF, pixel-space) or "
+             "'ukf' (Unscented KF, meter-space, gravity in process model). "
+             "Default: kalman."
     )
 
     args = parser.parse_args()
-
-    # Auto-set model/stats paths when ukf_nn tracker is selected
-    if args.tracker == "ukf_nn":
-        if args.model is None:
-            args.model = "models/nn_3d.weights.npz"
-        if args.stats is None:
-            args.stats = "models/feat_stats_3d.json"
 
     print("=" * 60)
     print("  OPSS - Optical Projectile Sensing System v2.0.0")
     print("  Unified Vision + Physics Pipeline")
     print("=" * 60)
     print(f"  Tracker: {args.tracker}")
-    if args.tracker == "ukf_nn":
-        print(f"  Model:   {args.model}")
-        print(f"  Stats:   {args.stats}")
 
     from opss.pipeline.core import OPSSPipeline, PipelineConfig
 
@@ -74,8 +58,6 @@ def main():
         capture_width=args.capture_width,
         capture_height=args.capture_height,
         tracker_type=args.tracker,
-        ukf_nn_model_path=args.model,
-        ukf_nn_stats_path=args.stats,
     )
 
     if args.no_web:

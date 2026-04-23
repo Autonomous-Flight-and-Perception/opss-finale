@@ -32,7 +32,7 @@ Envelope shape::
       "pipeline": {
         "healthy":    <bool>,         # pipeline liveness flag
         "fps":        <float>,        # latest rolling pipeline FPS
-        "tracker":    "kalman"|"ukf_nn",
+        "tracker":    "kalman"|"ukf",
         "frame":      "pixel"|"pixel_xy_metric_z"|"camera_metric"|"world_metric"
       },
       "targets":      [ <per-target dict>, ... ],  # sorted confidence-desc

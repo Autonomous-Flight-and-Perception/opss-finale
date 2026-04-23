@@ -246,11 +246,13 @@ OPSS/
 - Simple constant-velocity model
 - Fast, suitable for real-time
 
-**UKF-NN** (`ukf_nn/`) - Advanced hybrid estimator:
-- Unscented Kalman Filter with Neural Network correction
-- Handles unmodeled dynamics (wind, thrust lag, bias)
-- 30-40% improved accuracy over basic Kalman
-- Requires trained model for NN correction
+**UKF** (`ukf_nn/ukf.py::UKF3D`) - Unscented Kalman Filter:
+- 3D meter-space state vector with depth from RealSense
+- Sigma-point propagation, gravity in process model
+- Camera-frame or world-frame, depending on extrinsics
+- Selectable via `--tracker ukf`. (The `ukf_nn` package name is
+  historical — the same `UKF3D` class supports an optional NN residual
+  correction term, but the user-facing CLI exposes only the pure UKF.)
 
 **State Vector**: [x, y, z, vx, vy, vz]
 **Track Management**: Automatic track creation, confirmation, and deletion
@@ -291,9 +293,7 @@ class PipelineConfig:
 
     # Tracking
     max_track_distance: float = 100.0  # Max pixels for association
-    tracker_type: str = "kalman"       # "kalman" or "ukf_nn"
-    ukf_nn_model_path: str = None      # Path to trained UKF-NN model
-    ukf_nn_stats_path: str = None      # Path to feature statistics
+    tracker_type: str = "kalman"       # "kalman" or "ukf"
 
     # Physics validation
     max_velocity: float = 50.0         # m/s
@@ -326,7 +326,7 @@ heartbeat.
   "pipeline": {
     "healthy": true,
     "fps": 29.7,
-    "tracker": "ukf_nn",
+    "tracker": "ukf",
     "frame": "camera_metric"
   },
   "targets": [
@@ -402,9 +402,9 @@ while True:
         if not primary["valid"]:
             continue
         # primary["position"] is in `frame` with units primary["units"]
-        #   kalman                => pixel_xy_metric_z (x,y px; z m)
-        #   ukf_nn (no extrinsics) => camera_metric   (meters)
-        #   ukf_nn (extrinsics)    => world_metric    (meters, gravity -z)
+        #   kalman              => pixel_xy_metric_z (x,y px; z m)
+        #   ukf (no extrinsics) => camera_metric    (meters)
+        #   ukf (extrinsics)    => world_metric     (meters, gravity -z)
         # ... drive actuator ...
     except socket.timeout:
         # No datagram within staleness window => pipeline dead.
@@ -415,48 +415,32 @@ while True:
 > `send_raw_detections`) is retained as a debug-only method on the
 > broadcaster but is NOT called by the live pipeline.
 
-## Using UKF-NN (Advanced State Estimation)
+## Switching trackers
 
-The UKF-NN provides improved tracking accuracy by learning to correct for unmodeled dynamics.
-
-### Training the Model
-
-The UKF-NN requires a trained neural network. Use the training pipeline from UKF-NN_MVP:
+Two trackers are exposed via CLI:
 
 ```bash
-# Clone training repo
-git clone https://github.com/Autonomous-Flight-and-Perception/UKF-NN_MVP.git
-cd UKF-NN_MVP
-
-# Run full training pipeline
-./run_full_pipeline.sh
-
-# Copy trained model to OPSS
-cp src/models/nn.pt /path/to/OPSS/models/
-cp src/data/stats/feat_stats.json /path/to/OPSS/models/
+python3 main.py --tracker kalman   # default — linear KF, pixel-space + RealSense depth
+python3 main.py --tracker ukf      # Unscented KF, meter-space, gravity in process model
 ```
 
-### Enabling UKF-NN in OPSS
+Or programmatically:
 
 ```python
 from opss import OPSSPipeline, PipelineConfig
 
-config = PipelineConfig(
-    tracker_type="ukf_nn",
-    ukf_nn_model_path="models/nn.pt",
-    ukf_nn_stats_path="models/feat_stats.json"
-)
-
-pipeline = OPSSPipeline(config)
+pipeline = OPSSPipeline(PipelineConfig(tracker_type="ukf"))
 pipeline.start()
 ```
 
-### Expected Improvements
+Both feed the same downstream physics validator and B2₃ fusion stages,
+so swapping `--tracker` changes only the state-estimation step. Useful
+for filter-comparison demos: same scene, different estimator.
 
-| Metric | Basic Kalman | UKF-NN |
-|--------|--------------|--------|
-| Velocity RMSE | ~0.5-0.6 m/s | ~0.3-0.35 m/s |
-| Improvement | - | 30-40% |
+> The underlying `UKF3D` class also supports an optional NN residual
+> correction term (used historically as "UKF-NN"), but that path is
+> not exposed through the CLI in this finale build. The pure UKF is
+> what `--tracker ukf` selects.
 
 ## Troubleshooting
 

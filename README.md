@@ -12,7 +12,7 @@ is in this repo — the source repos that fed into it are preserved under
   │                                                              │
   │   RealSense D415/D435 ──► vision/ (host-native Python)       │
   │                           ├─ YOLOv8 (user_best.pt, CUDA)     │
-  │                           ├─ Kalman tracker / UKF-NN         │
+  │                           ├─ Kalman tracker / UKF             │
   │                           ├─ physics validator + B2₃ fusion  │
   │                           └─ FastAPI @ :8000                 │
   │                              ├─ /                 (dashboard)│
