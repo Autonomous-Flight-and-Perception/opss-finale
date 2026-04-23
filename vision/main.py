@@ -5,13 +5,12 @@ Main entry point for the unified vision + physics pipeline.
 
 Usage:
     python main.py                              # Kalman only on :8000
-    python main.py --port 8080                  # Custom port
-    python main.py --no-web                     # Run pipeline without web server
-    python main.py --tracker ukf                # Unscented Kalman Filter only
-    python main.py --tracker kalman,ukf         # Both filters in parallel,
-                                                #   Kalman drives the cobot
-    python main.py --tracker kalman,ukf --primary ukf
-                                                # Both, UKF drives the cobot
+    python main.py --tracker ukf                # CTRV UKF only
+    python main.py --tracker pf                 # Particle filter only
+    python main.py --tracker adaptive           # Auto-switching KF / UKF / PF
+    python main.py --tracker kalman,ukf,pf,adaptive --primary adaptive
+                                                # All four in parallel,
+                                                #   adaptive drives the cobot
 """
 import argparse
 import sys
@@ -44,9 +43,12 @@ def main():
     parser.add_argument(
         "--tracker", default="kalman",
         help="One or more state estimators (comma-separated). Choices: "
-             "'kalman' (linear KF, pixel-space) and 'ukf' (Unscented KF, "
-             "meter-space, gravity in process model). Pass both for a "
-             "parallel comparison demo: --tracker kalman,ukf. Default: kalman."
+             "'kalman' (linear constant-velocity KF), "
+             "'ukf' (CTRV nonlinear UKF, ported from MonteCarlo), "
+             "'pf' (3D particle filter, ported from PF repo), "
+             "'adaptive' (auto-switches KF/UKF/PF by motion regime). "
+             "Pass several for a parallel comparison demo: "
+             "--tracker kalman,ukf,pf,adaptive. Default: kalman."
     )
     parser.add_argument(
         "--primary", default=None,
@@ -56,7 +58,7 @@ def main():
 
     args = parser.parse_args()
 
-    valid_trackers = {"kalman", "ukf"}
+    valid_trackers = {"kalman", "ukf", "pf", "adaptive"}
     tracker_names = [t.strip() for t in args.tracker.split(",") if t.strip()]
     unknown = [t for t in tracker_names if t not in valid_trackers]
     if unknown:

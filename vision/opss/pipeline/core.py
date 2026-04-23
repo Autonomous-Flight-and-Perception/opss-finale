@@ -54,13 +54,26 @@ except Exception:
     YOLO_AVAILABLE = False
     process_frame_bgr = None
 
-# Optional UKF import (the underlying tracker class is named MultiObjectUKFNN
-# for historical reasons — it supports nn_model=None which gives a pure UKF).
+# UKF (CTRV — Constant Turn Rate Velocity, ported from MonteCarlo).
 try:
-    from ..state.ukf_nn_tracker import MultiObjectUKFNN, create_ukf_nn_tracker
+    from ..state.ctrv_ukf_tracker import MultiObjectCTRVUKF, create_ctrv_ukf_tracker
     UKF_AVAILABLE = True
-except ImportError:
+except Exception:
     UKF_AVAILABLE = False
+
+# Particle filter (3D, ported from PF repo).
+try:
+    from ..state.pf_tracker import MultiObjectParticleFilter, create_pf_tracker
+    PF_AVAILABLE = True
+except Exception:
+    PF_AVAILABLE = False
+
+# Adaptive selector (KF + UKF + PF, switch by motion regime).
+try:
+    from ..state.adaptive import MultiObjectAdaptive, create_adaptive_tracker
+    ADAPTIVE_AVAILABLE = True
+except Exception:
+    ADAPTIVE_AVAILABLE = False
 
 
 @dataclass
@@ -193,49 +206,40 @@ class OPSSPipeline:
             requested = list(self.config.tracker_types) or ["kalman"]
             self._primary_tracker_name = self.config.primary_tracker or requested[0]
 
-            # Camera intrinsics — needed by the UKF for pixel→meter unprojection
-            camera_intr = None
-            hw_intr = self._camera.get_intrinsics()
-            if hw_intr is not None:
-                from ..state.ukf_nn_tracker import CameraIntrinsics
-                from ..state.ukf_nn import config as ukf_cfg
-                camera_intr = CameraIntrinsics(
-                    fx=hw_intr["fx"], fy=hw_intr["fy"],
-                    cx=hw_intr["cx"], cy=hw_intr["cy"],
-                )
-                # Warn if hardware intrinsics drift from config defaults
-                tol = ukf_cfg.INTRINSIC_WARN_TOLERANCE
-                for name, hw_val, cfg_val in [
-                    ("fx", hw_intr["fx"], ukf_cfg.CAMERA_FX),
-                    ("fy", hw_intr["fy"], ukf_cfg.CAMERA_FY),
-                    ("cx", hw_intr["cx"], ukf_cfg.CAMERA_CX),
-                    ("cy", hw_intr["cy"], ukf_cfg.CAMERA_CY),
-                ]:
-                    if cfg_val > 0 and abs(hw_val - cfg_val) / cfg_val > tol:
-                        print(f"[PIPELINE] WARNING: Hardware {name}={hw_val:.1f} "
-                              f"differs from config {cfg_val:.1f} by "
-                              f"{abs(hw_val - cfg_val) / cfg_val * 100:.1f}%")
-
             for name in requested:
                 if name == "kalman":
                     self._trackers["kalman"] = create_tracker(
                         max_distance=self.config.max_track_distance,
                         max_tracks=self.config.max_tracks,
                     )
-                    print("[PIPELINE] Kalman tracker initialized")
+                    print("[PIPELINE] Kalman tracker initialized (linear CV)")
                 elif name == "ukf":
                     if not UKF_AVAILABLE:
                         print("[PIPELINE] WARNING: UKF requested but unavailable, skipping")
                         continue
-                    # model_path=None => pure UKF (no NN residual term).
-                    self._trackers["ukf"] = create_ukf_nn_tracker(
+                    self._trackers["ukf"] = create_ctrv_ukf_tracker(
                         max_distance=self.config.max_track_distance,
-                        model_path=None,
-                        stats_path=None,
-                        camera=camera_intr,
                         max_tracks=self.config.max_tracks,
                     )
-                    print("[PIPELINE] UKF tracker initialized (pure UKF, no NN)")
+                    print("[PIPELINE] UKF tracker initialized (CTRV nonlinear, ported from MonteCarlo)")
+                elif name == "pf":
+                    if not PF_AVAILABLE:
+                        print("[PIPELINE] WARNING: PF requested but unavailable, skipping")
+                        continue
+                    self._trackers["pf"] = create_pf_tracker(
+                        max_distance=self.config.max_track_distance,
+                        max_tracks=self.config.max_tracks,
+                    )
+                    print("[PIPELINE] Particle filter initialized (300 particles, ported from PF repo)")
+                elif name == "adaptive":
+                    if not ADAPTIVE_AVAILABLE:
+                        print("[PIPELINE] WARNING: adaptive requested but unavailable, skipping")
+                        continue
+                    self._trackers["adaptive"] = create_adaptive_tracker(
+                        max_distance=self.config.max_track_distance,
+                        max_tracks=self.config.max_tracks,
+                    )
+                    print("[PIPELINE] Adaptive tracker initialized (auto-switches KF / UKF / PF)")
                 else:
                     print(f"[PIPELINE] WARNING: unknown tracker '{name}', skipping")
 
@@ -555,13 +559,16 @@ class OPSSPipeline:
 
         return detections
 
-    # BGR colors per tracker, chosen to be visually distinct on a typical
-    # color frame and to read as "Kalman = warm, UKF = cool" at a glance.
+    # BGR colors per tracker. Chosen to be visually distinct on top of a
+    # typical drone-vs-sky frame; one filter per color so a parallel demo
+    # can be read at a glance.
     _TRACKER_COLORS = {
-        "kalman": (0, 165, 255),   # orange
-        "ukf":    (255, 200, 0),   # cyan-ish blue
+        "kalman":   (0, 165, 255),    # orange
+        "ukf":      (255, 200, 0),    # cyan-ish blue
+        "pf":       (180, 50, 255),   # magenta-ish (PF = particle cloud)
+        "adaptive": (0, 255, 0),      # green (whichever filter is "active")
     }
-    _TRACKER_LABEL = {"kalman": "K", "ukf": "U"}
+    _TRACKER_LABEL = {"kalman": "K", "ukf": "U", "pf": "P", "adaptive": "A"}
 
     def _draw_annotations_multi(
         self,
@@ -605,7 +612,11 @@ class OPSSPipeline:
                     thick = 1
 
                 cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thick)
-                label = f"[{tag}] id={state.track_id} {state.confidence:.2f}"
+                # For adaptive, surface which underlying filter was picked
+                # this tick (set by adaptive.py via bbox["filter_used"]).
+                used = state.bbox.get("filter_used")
+                tag_full = f"{tag}->{used[0].upper()}" if (name == "adaptive" and used) else tag
+                label = f"[{tag_full}] id={state.track_id} {state.confidence:.2f}"
                 cv2.putText(annotated, label, (x1, max(y1 - 8, 12)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
@@ -656,22 +667,8 @@ class OPSSPipeline:
             if tag:
                 return tag
 
-        # Fallback by primary tracker type (empty-target heartbeat path).
-        primary = self._primary_tracker_name or "kalman"
-        if primary == "ukf":
-            ukf_tracker = self._trackers.get("ukf")
-            if UKF_AVAILABLE and ukf_tracker is not None:
-                # Identity extrinsics => world == camera; non-identity => world.
-                R = getattr(ukf_tracker, "R_world_from_cam", None)
-                t = getattr(ukf_tracker, "t_world_from_cam", None)
-                if R is not None and t is not None:
-                    is_identity = (
-                        np.allclose(R, np.eye(3), atol=1e-12)
-                        and np.allclose(t, 0.0, atol=1e-12)
-                    )
-                    return "camera_metric" if is_identity else "world_metric"
-            return "camera_metric"
-        # Kalman default.
+        # All current trackers (Kalman, CTRV-UKF, PF, adaptive) emit
+        # ``pixel_xy_metric_z`` — pixel xy + meter z (RealSense depth).
         return "pixel_xy_metric_z"
 
     # Public accessors
